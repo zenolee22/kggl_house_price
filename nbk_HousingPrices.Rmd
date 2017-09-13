@@ -12,6 +12,9 @@ library(plotly)
 library(Boruta)
 library(dplyr)
 library(corrplot)
+library(xgboost)
+
+# Hello
 ```
 
 
@@ -136,20 +139,6 @@ lattice_list
 
 ```
 
-
-## Extreme Gradient Boosting (XGBoost)
-
-
-
-# Correlation Analysis
-
-Unfortunately, the corrplot package only works with Numeric data fields.  To do a correlation analysis on all other variables, we would probably need to run ANOVA tests.
-```{r, eval=TRUE}
-M <-cor(explanatory[,sapply(explanatory,is.numeric)])
-corrplot(M,method="circle")
-```
-
-
 ```{r Running Boruta, eval=TRUE}
 set.seed(13)
 
@@ -173,6 +162,21 @@ plot(bor.results)
 results_df <- data.frame(attStats(bor.results))  #allStats is part of Boruta that summarizes the results into a table
 results_df[order(-results_df$normHits),]  #Just sorting by importance
 
+```
+
+## Extreme Gradient Boosting (XGBoost)
+```{r XGBoosting, eval=TRUE}
+
+```
+
+
+
+# Correlation Analysis
+
+Unfortunately, the corrplot package only works with Numeric data fields.  To do a correlation analysis on all other variables, we would probably need to run ANOVA tests.
+```{r, eval=TRUE}
+M <-cor(explanatory[,sapply(explanatory,is.numeric)])
+corrplot(M,method="circle")
 ```
 
 
