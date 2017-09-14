@@ -8,13 +8,12 @@ output:
 Set Libraries
 ```{r libraries, eval=TRUE, message=FALSE}
 library(data.table)
-library(plotly)
-library(Boruta)
-library(dplyr)
-library(corrplot)
+library(plotly)    # Plots and Graphs
+library(Boruta) 
+library(dplyr)     # Data Manipulation
+library(corrplot)  # Correlation Plots
 library(xgboost)
-
-# Hello
+library(DiagrammeR)  #Needed to Plot XGB Trees
 ```
 
 
@@ -44,10 +43,10 @@ data.train %>% group_by(PoolQC) %>% tally()
 
 ## Missing Values?
 
-Count of NULL/NA values per column 
+% of data that is NULL/NA by column
 ```{r}
 #sapply(data.train,function(x) sum(x=="NULL"))  # Use when Null
-sapply(data.train,function(x) sum(is.na(x)))   # Use when NA
+round(sapply(data.train,function(x) sum(is.na(x))) / nrow(data.train) * 100,digits=3)   # Use when NA
 ```
 
 # Feature Engineering
@@ -106,7 +105,7 @@ for (x in field.attributes$character){
 
 ```
 
-```{r}
+```{r Plot Histograms, eval=TRUE}
 
 plot_list <- htmltools::tagList()
 seq_count = 4
@@ -149,23 +148,69 @@ bor.results <- Boruta(explanatory,response,maxRuns = 101,doTrace = 0)
 Reviewing the Boruta Analysis Results
 
 Summary of the Boruta Analysis
-```{r}
+```{r Print Boruta Results, eval=TRUE}
 print(bor.results)
 ```
 
 Plot of the Boruta Analysis
-```{r}
+```{r Plot Boruta Results, eval=TRUE}
 plot(bor.results)
 ```
 
-```{r}
+```{r Get Boruta Results, eval=TRUE}
 results_df <- data.frame(attStats(bor.results))  #allStats is part of Boruta that summarizes the results into a table
 results_df[order(-results_df$normHits),]  #Just sorting by importance
 
 ```
 
 ## Extreme Gradient Boosting (XGBoost)
+
+Introduction to Boosted Trees:
+http://xgboost.readthedocs.io/en/latest/model.html
+
+XGBoost R Tutorial can be found:
+http://xgboost.readthedocs.io/en/latest/R-package/xgboostPresentation.html
+
+XGBoost is a supervised machine learning technique, where the output is provided.  
+
 ```{r XGBoosting, eval=TRUE}
+
+dtrain=xgb.DMatrix(as.matrix(explanatory[,field.attributes$integer]), label=response)
+
+for (x in field.attributes$integer)
+{
+  data.test[[x]][is.na(data.test[[x]])] <- -1
+}
+
+dtest=xgb.DMatrix(as.matrix(data.test[,field.attributes$integer]))
+
+#xgboost parameters
+xgb_params = list(
+  seed = 0,
+  colsample_bytree = 0.5,
+  subsample = 0.8,
+  eta = 0.02, 
+  objective = 'reg:linear',
+  max_depth = 12,
+  alpha = 1,
+  gamma = 2,
+  min_child_weight = 1,
+  base_score = 7.76
+)
+
+best_n_rounds = 100
+
+model.xgboost = xgb.train(xgb_params
+                          ,dtrain
+                          ,nfolds = 5  #Cross Validation
+                          ,nrounds = as.integer(best_n_rounds))
+
+predict(model.xgboost,dtest)
+
+xgb.plot.tree(feature_names =field.attributes$integer, model=model.xgboost)
+
+importance_matrix <- xgb.importance(feature_names =field.attributes$integer, model=model.xgboost)
+xgb.plot.importance(importance_matrix)
 
 ```
 
