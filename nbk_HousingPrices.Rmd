@@ -1,8 +1,9 @@
 ---
 title: "Kaggle Housing Prices"
 output:
-  html_document: default
+  pdf_document: default
   html_notebook: default
+  html_document: default
 ---
 
 Set Libraries
@@ -13,7 +14,8 @@ library(Boruta)
 library(dplyr)     # Data Manipulation
 library(corrplot)  # Correlation Plots
 library(xgboost)
-library(DiagrammeR)  #Needed to Plot XGB Trees
+library(Matrix)
+#library(DiagrammeR)  #Needed to Plot XGB Trees
 ```
 
 
@@ -48,6 +50,8 @@ data.train %>% group_by(PoolQC) %>% tally()
 #sapply(data.train,function(x) sum(x=="NULL"))  # Use when Null
 round(sapply(data.train,function(x) sum(is.na(x))) / nrow(data.train) * 100,digits=3)   # Use when NA
 ```
+
+There are some obvious variables that should be excluded from the dataset, i.e. PoolQC which has 99% of it's data missing, MiscFeature which has 96% of it's data missing, etc.
 
 # Feature Engineering
 
@@ -86,23 +90,34 @@ field.types <- sapply(field.features, function(x){class(data.train[[x]])})
 table(field.types)
 
 field.classes <- unique(field.types)
-
 field.attributes <- lapply(field.classes, function(x){names(field.types[field.types==x])})
-
 names(field.attributes) <- field.classes
 
 response <- data.train$SalePrice
-explanatory <- data.train[field.features]
+explanatory.train <- data.train[field.features]
+explanatory.test <- data.test[field.features]
 
 for (x in field.attributes$integer)
 {
-  explanatory[[x]][is.na(explanatory[[x]])] <- -1
+  explanatory.train[[x]][is.na(explanatory.train[[x]])] <- -1
+  explanatory.test[[x]][is.na(explanatory.test[[x]])] <- -1
 }
 
 for (x in field.attributes$character){
-  explanatory[[x]][is.na(explanatory[[x]])] <- "*MISSING*"
+  explanatory.train[[x]][is.na(explanatory.train[[x]])] <- "MISSING"
+  explanatory.test[[x]][is.na(explanatory.test[[x]])] <- "MISSING"
 }
 
+rmvitems <- c("Alley","PoolQC","Fence","MiscFeature")
+
+#Remove features where the majority of the data is missing
+explanatory.train <- explanatory.train %>% select(-Alley,-PoolQC,-Fence,-MiscFeature)
+explanatory.test <- explanatory.test %>% select(-Alley,-PoolQC,-Fence,-MiscFeature)
+
+#Remove those fields from the attribute list
+field.attributes$integer <- field.attributes$integer[! field.attributes$integer %in% rmvitems]
+field.attributes$character <- field.attributes$character[! field.attributes$character %in% rmvitems]
+field.features <- field.features[! field.features %in% rmvitems]
 ```
 
 ```{r Plot Histograms, eval=TRUE}
@@ -141,7 +156,7 @@ lattice_list
 ```{r Running Boruta, eval=TRUE}
 set.seed(13)
 
-bor.results <- Boruta(explanatory,response,maxRuns = 101,doTrace = 0)
+bor.results <- Boruta(explanatory.train,response,maxRuns = 101,doTrace = 0)
 ```
 
 
@@ -159,30 +174,132 @@ plot(bor.results)
 
 ```{r Get Boruta Results, eval=TRUE}
 results_df <- data.frame(attStats(bor.results))  #allStats is part of Boruta that summarizes the results into a table
-results_df[order(-results_df$normHits),]  #Just sorting by importance
+results_df[order(-results_df$meanImp),]  #Just sorting by importance
 
 ```
 
 ## Extreme Gradient Boosting (XGBoost)
 
 Introduction to Boosted Trees:
+
 http://xgboost.readthedocs.io/en/latest/model.html
 
 XGBoost R Tutorial can be found:
+
 http://xgboost.readthedocs.io/en/latest/R-package/xgboostPresentation.html
 
-XGBoost is a supervised machine learning technique, where the output is provided.  
+Exploratory Data Analysis with XGBoost:
+
+http://xgboost.readthedocs.io/en/latest/R-package/discoverYourData.html
+
+XGBoost is a supervised machine learning technique, where the output is provided.  The **regularization** term is what controls the complexity of the model to prevent overfitting.
+
+In Machine Learning, we talk of the relationship between simplicity and predictability of the model.  The tradeoff is referred to the **bias-variance** tradeoff.
+
+XGBoost is a tree ensemble, which is a set of classification and regression trees (CART).  CART differs from decision trees in that decision trees only provide the decision values, whereas CART provides an associated score with each leaf.
+
+![*CART Example*](W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/twocart.png)
+
+Random forests are also ensemble trees.  The only difference between Random Forests and XG Boost is how the model is trained.
+
+To train the model, XG Boost uses an additive algorithm.  Fix what has been learned and add 1 new tree at a time.
+
+To begin implementing XG Boost
+
+Description of the parameters for the xgboost package:
+
+* objective = "binary:logistic": You can set the objective function.  Here as an example, you can set it as a binary classification model.
+* max.depth = n: you can set the max depth of trees
+* nthread = n:  number of cpu threads to use
+* nround = n: number of passes to make on the data.  Each round will enhance the model by further reducing the difference between the ground truth and prediction.  The more complex the relationship between your features and your label (response variable), the more rounds you will need
+* verbose = 0,1,2:  0 is no messages, 1 prints evaluation metric, 2 also prints the information about the tree
+* watchlist = list(train=train,test=test): allows you to feed a test set into the model so that the model can keep retesting itself on the test set.  This way you can measure the progress of learning.  This will help prevent overfitting and can define a stopping point when the model is optimized and no longer needs any more iterations.
+* eval.metric = "logloss" and/or "error":  you can have either or both.  Allows you to monitor the error in each round.  Requires the watchlist?
+* booster = "gblinear":  allows you to use a linear boosting algorithm
+
+XGBoost produces a regression model.  In a binary classification model, the predictions will be probabilities that range from 0 < p < 1.  To interpret the prediction for the binary classification, you can set the probability to > .5, etc.
+
+For a multiclass classification, the similar concept of assigning a threshold applies.
+
+## Data Preparation for xgboost
+
+xgboost only takes numeric variables.  We will need to convert categorical variables, like state, into a numeric variable that can be fed into xgboost.  We will convert a dense matrix (few zeroes in the matrix) to a sparse matrix (many zeroes in the matrix).
+
+One method is called **one-hot encoding**. It is a respresentation of a categorical variable as a binary vector.
+
+Let's show you an example.  Suppose you have the following sequence:
+  'red','red','green'
+  
+Represented as an integer:
+
+  0,0,1
+  
+One Hot Encoding Representation would look like:
+
+  [0,1]
+  
+  [0,1]
+  
+  [1,0]
+
+*Note:  When possible, it is ideal to use the data.table instead of the data.frame.  data.table is 100% compliant with data.frames and its performance is much better.*
+
+For many machine learning algorithms, having highly correlated variables is not a good idea.  It can make predictions less accurate and makes interpreting the model almost impossible.  GLM's for example assume that features are uncorrelated.
+
+Decision tree algorithms, including boosted trees, are very robust to correlated features and one does not have to do anything to manage the correlations.
+
+*Note: You will want to either remove the ID field or NULL it out.*
+
+```{r}
+
+#Build Sparse Matrix
+data.train.sparse <- explanatory.train[field.attributes$integer]
+data.test.sparse <- explanatory.test[field.attributes$integer]
+
+head(sparse.model.matrix(explanatory.train))
+
+# One Hot Encode Train
+for (j in 1:length(field.attributes$character))
+{
+  print(field.attributes$character[j])
+  
+  toEncode <- unique(explanatory.train[,field.attributes$character[j]])
+  for (i in 1:(length(toEncode)-1))
+  {
+    data.train.sparse[,paste(field.attributes$character[j],toEncode[i],sep="_")] <- ifelse(explanatory.train[,field.attributes$character[j]] == toEncode[i],1,0)
+  }
+}
+
+# One Hot Encode Test
+for (j in 1:length(field.attributes$character))
+{
+  toEncode <- unique(explanatory.test[,field.attributes$character[j]])
+  for (i in 1:(length(toEncode)-1))
+  {
+    data.test.sparse[,paste(field.attributes$character[j],toEncode[i],sep="_")] <- ifelse(explanatory.test[,field.attributes$character[j]] == toEncode[i],1,0)
+  }
+}
+
+
+#toEncode <- unique(data.train[,field.attributes$character[2]])
+
+#for (i in 1:length(toEncode))
+#{
+#  data.sparse[,paste(field.attributes$character[2],toEncode[i],sep="_")] <- ifelse(data.train[,field.attributes$character[2]] == toEncode[i],1,0)
+#}
+
+#head(data.sparse)
+
+```
+
+
 
 ```{r XGBoosting, eval=TRUE}
 
-dtrain=xgb.DMatrix(as.matrix(explanatory[,field.attributes$integer]), label=response)
-
-for (x in field.attributes$integer)
-{
-  data.test[[x]][is.na(data.test[[x]])] <- -1
-}
-
-dtest=xgb.DMatrix(as.matrix(data.test[,field.attributes$integer]))
+# using xgboost package to create the matrix, but you don't have to use the xgboost matrix
+#dtrain=xgb.DMatrix(as.matrix(explanatory[,field.attributes$integer]), label=response)
+dtrain=xgb.DMatrix(as.matrix(data.train.sparse), label=response)
+dtest=xgb.DMatrix(as.matrix(data.test.sparse[,field.attributes$integer]))
 
 #xgboost parameters
 xgb_params = list(
@@ -201,19 +318,66 @@ xgb_params = list(
 best_n_rounds = 100
 
 model.xgboost = xgb.train(xgb_params
-                          ,dtrain
-                          ,nfolds = 5  #Cross Validation
-                          ,nrounds = as.integer(best_n_rounds))
+                          ,data=dtrain
+                          #,nfolds = 5  #Cross Validation
+                          ,nthread = 2
+                          #,max.depth = 10
+                          ,nrounds = as.integer(best_n_rounds)
+                          #,verbose = 1
+                          #,watchlist=watchlist
+                          #,eval.metric = "logloss"
+                          #,eval.metric = "error"
+                          )
 
-predict(model.xgboost,dtest)
+# Save the predictions on Test data
+prediction <- predict(model.xgboost,dtest)
 
-xgb.plot.tree(feature_names =field.attributes$integer, model=model.xgboost)
+importance_matrix <- xgb.importance(feature_names=names(data.train.sparse), model=model.xgboost)
 
-importance_matrix <- xgb.importance(feature_names =field.attributes$integer, model=model.xgboost)
-xgb.plot.importance(importance_matrix)
+xgb.plot.importance(importance_matrix=importance_matrix)
 
 ```
 
+```{r}
+#Outputs Tree
+#xgb.dump(model.xgboost,with_stats=T,fname="W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/tree.txt")
+
+```
+
+If the datasets are large and you don't want to spend the time having to retrain the model in the future.  You can save the model.
+```{r, eval=FALSE}
+
+#To Save
+xgb.save(model.xgboost,"model.xgboost")
+
+#To Load a Saved Model
+model.xgboost2 <-  xgb.load("model.xgboost")
+```
+
+
+## Comparing Importance Results
+
+```{r Comparison, eval=TRUE}
+results_df <- results_df[order(-results_df$meanImp),]
+results_df$feature <- factor(row.names(results_df),levels=unique(row.names(results_df))[order(results_df$meanImp,decreasing=FALSE)])
+
+xgb_df <- data.frame(importance_matrix)
+xgb_df$Feature <- factor(xgb_df$Feature,levels=unique(xgb_df$Feature)[order(xgb_df$Gain,decreasing=FALSE)])
+
+nfeats = 15
+
+secondaxis <- list(overlaying="y",side="right",title="XGBoost")
+
+p_boruta <- plot_ly(x=head(results_df[,"meanImp"],n=nfeats),y=head(results_df$feature,n=nfeats), type="bar", orientation = "h",name="Boruta")
+p_xgb <- plot_ly(x=head(xgb_df$Gain,n=nfeats),y=head(xgb_df$Feature,n=nfeats),type="bar",orientation="h", name="XGBoost") %>% layout(title="Boruta vs XG Boost - Feature Importance")
+
+p_compare <- subplot(p_boruta,p_xgb)
+
+#htmlwidgets::saveWidget(p_compare, "Boruta vs XGBoost Feature Importance.html")
+
+p_compare
+
+```
 
 
 # Correlation Analysis
@@ -222,6 +386,10 @@ Unfortunately, the corrplot package only works with Numeric data fields.  To do 
 ```{r, eval=TRUE}
 M <-cor(explanatory[,sapply(explanatory,is.numeric)])
 corrplot(M,method="circle")
+
+M <- cor(explanatory.train[,c("GarageCars","GarageArea")])
+corrplot(M,method="circle")
+
 ```
 
 
