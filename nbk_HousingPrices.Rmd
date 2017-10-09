@@ -1,21 +1,41 @@
 ---
 title: "Kaggle Housing Prices"
 output:
-  pdf_document: default
   html_notebook: default
   html_document: default
+  pdf_document: default
 ---
+
+#Introduction
+The following notebook is designed to simply explore and learn practical machine learning techniques utilizing data retrieved from Kaggle.  
+
+#Overview
+1.  Initialization
+2.  Import Data
+3.  Exploratory Analysis
+4.  Feature Engineering
+    * Boruta Analysis
+5.  Boosting
+    * Extreme Gradient Boosting
+6.  Results
+7.  Correlation Analysis
+8.  Appendix A.  Data Dictionary
+9.  Appendix B.  XGBoost Resources
+10.  Appendix C.  Preventing Overfitting
+
+
+#Initialization
 
 Set Libraries
 ```{r libraries, eval=TRUE, message=FALSE}
 library(data.table)
 library(plotly)    # Plots and Graphs
-library(Boruta) 
+library(Boruta)    # Runs a Boruta Feature Analysis
 library(dplyr)     # Data Manipulation
 library(corrplot)  # Correlation Plots
-library(xgboost)
-library(Matrix)
-#library(DiagrammeR)  #Needed to Plot XGB Trees
+library(xgboost)   # Runs Extreme Gradient Boosting
+library(Matrix)    # For sparse matrices
+
 ```
 
 
@@ -51,7 +71,11 @@ data.train %>% group_by(PoolQC) %>% tally()
 round(sapply(data.train,function(x) sum(is.na(x))) / nrow(data.train) * 100,digits=3)   # Use when NA
 ```
 
-There are some obvious variables that should be excluded from the dataset, i.e. PoolQC which has 99% of it's data missing, MiscFeature which has 96% of it's data missing, etc.
+There are some obvious variables that should be excluded from the dataset, i.e. features with > 80% of missing data.  
+
+Alley, PoolQC, Fence, and MiscFeature will be removed as they all have missing values > 80%.  FireplaceQU is questionable as ~50% of the data is missing.  
+
+*Note: Although xgboost should be able to handle the missing values, for efficiency, they should be excluded from further analysis.*
 
 # Feature Engineering
 
@@ -178,19 +202,9 @@ results_df[order(-results_df$meanImp),]  #Just sorting by importance
 
 ```
 
+# Boosting
+
 ## Extreme Gradient Boosting (XGBoost)
-
-Introduction to Boosted Trees:
-
-http://xgboost.readthedocs.io/en/latest/model.html
-
-XGBoost R Tutorial can be found:
-
-http://xgboost.readthedocs.io/en/latest/R-package/xgboostPresentation.html
-
-Exploratory Data Analysis with XGBoost:
-
-http://xgboost.readthedocs.io/en/latest/R-package/discoverYourData.html
 
 XGBoost is a supervised machine learning technique, where the output is provided.  The **regularization** term is what controls the complexity of the model to prevent overfitting.
 
@@ -200,22 +214,72 @@ XGBoost is a tree ensemble, which is a set of classification and regression tree
 
 ![*CART Example*](W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/twocart.png)
 
-Random forests are also ensemble trees.  The only difference between Random Forests and XG Boost is how the model is trained.
+Random forests are also ensemble trees.  The only difference between Random Forests and XG Boost is how the model is trained.  To train the model, XG Boost uses an additive algorithm.  Fix what has been learned and add 1 new tree at a time.
 
-To train the model, XG Boost uses an additive algorithm.  Fix what has been learned and add 1 new tree at a time.
+Advantages of XGBoost:
 
-To begin implementing XG Boost
+1.  Parallel Computing:  Parallel processing is enabled.  By default, it will use all cores on your machine.
+2.  Regularization:  Advtange over GBM package, which does not have regularization.  See Appendix B.
+3.  Cross Validation:  Though there are packages out there to handle cross validation, xgboost has an internal CV function.
+4.  Missing Values:  XGBoost handles missing values internally.  If missing values have a pattern, it will be captured by the model.
+5.  Flexibility:  In addition to regression, classification and ranking problems, you can define custom objective functions.  It also supports user defined evaluation metrics.  
+6.  Availability:  It's available in R, Python, Java, Julia and Scala.
+7.  Save and Reload:  You can save the model and reload it.  
+8.  Tree Pruning:  XGBoost continues to grow a tree until the max depth, and then prunes backwards until the improvement on the loss function is below threshold.
+
+For many machine learning algorithms, having highly correlated variables is not a good idea.  It can make predictions less accurate and makes interpreting the model almost impossible.  GLM's for example assume that features are uncorrelated.
+
+Decision tree algorithms, including boosted trees, are very robust to correlated features and one does not have to do anything to manage the correlations.
+
+For Classification problems, trees are grown to reduce misclassification rates in subsequent iterations.  
+
+For Regression problems, it builds a generalized linear model and optimizes it using regularization (L1, L2) and gradient descent.  Subsequent models are built on residuals (Actual - Predicted).  *Gradient Descent* is a method where a vector of weights (or coefficients), we want to minimize the partial derivatives to find the local minima of the RSS.  Simply put, we want to minimize the error by tuning the values of the coefficients.
+
+## Utilizing the xgboost package
 
 Description of the parameters for the xgboost package:
 
-* objective = "binary:logistic": You can set the objective function.  Here as an example, you can set it as a binary classification model.
-* max.depth = n: you can set the max depth of trees
-* nthread = n:  number of cpu threads to use
-* nround = n: number of passes to make on the data.  Each round will enhance the model by further reducing the difference between the ground truth and prediction.  The more complex the relationship between your features and your label (response variable), the more rounds you will need
-* verbose = 0,1,2:  0 is no messages, 1 prints evaluation metric, 2 also prints the information about the tree
-* watchlist = list(train=train,test=test): allows you to feed a test set into the model so that the model can keep retesting itself on the test set.  This way you can measure the progress of learning.  This will help prevent overfitting and can define a stopping point when the model is optimized and no longer needs any more iterations.
-* eval.metric = "logloss" and/or "error":  you can have either or both.  Allows you to monitor the error in each round.  Requires the watchlist?
-* booster = "gblinear":  allows you to use a linear boosting algorithm
+### General Parameters
+* **booster = "gblinear" or "gbtree":**  allows you to use a linear or classification boosting algorithm
+* **nthread = n:**  number of cpu threads to use.  By default it will use the max.
+* **silent = 0 or 1:**  1 prints running messages to the console.  Best to keep at 0.
+
+### Parameters for Tree Booster
+* **nround = n:** number of passes to make on the data.  Each round will enhance the model by further reducing the difference between the ground truth and prediction.  The more complex the relationship between your features and your label (response variable), the more rounds you will need.  By default it will run 100.
+* **eta = 0 - 1:**  By default, it is set to 0.3.  This controls the learning rate, i.e. the rate in which the model learns patterns in data.  After every round, it shrinks the feature weights to reach optimum.  Lower the eta, the slower the computation and must be supported by **nround**.
+* **gamma = 0 - inf:**  Controls the regularization.  Higher the value, the higher the regularization.  Default is set to 0, which means no regularization.  As a trick, you can set the gamma to 0 and check the CV error rate.  If the train error >>> test error, bring the gamma into action.  Higher the gamma, the lower the difference between Train and Test CV.  Gamma brings improvement when you want to use shallow trees.
+* **max.depth = n:** you can set the max depth of trees.  Larger the depth, higher the chances of overfitting.  This should be tuned with CV.
+* **min_child_weight = 0 - inf:**  In Regression, refers to the min number of instances required in a child node.  In Classfication, if the leaf node has a minimum sum of instance weights lower than the min_child_weight, the tree splitting stops.  Basically another feature to prevent overfitting.
+* **subsample = 0 - 1:**  controls the number of samples (observations) supplied to a tree.  Typically, this is (0.5,0.8).  Default is 1.
+* **colsample_bytree = 0 - 1:** controls the number of features supplied to a tree.  Typically, that is (0.5,0.9).  Default is 1.
+* **lambda = 0 or 1:** enables the L2 regularization (Ridge Regression) on weights.  Default is 0
+* **alpha = 0 or 1:** enables the L1 regularization (Lasso Regression) on weights.  In addition to shrinkage, alpha also results in feature selection.
+
+### Parameters for Linear Booster
+Uses significantly less parameters than the Tree Booster
+
+* **nround = n:** 
+* **lambda = 0 or 1:** 
+* **alpha = 0 or 1:** 
+
+### Learning Task Parameters
+
+* **objective = (see below):** You can set the objective function.  Here as an example, you can set it as a binary classification model.
+  * reg:linear - linear regression
+  * binary:logistic - logistic regression for binary classification.  Returns class probabilities
+  * multi:softmax - multiclassification using softmax objective.  Returns predicted class labels.  Requires setting num_class parameter denoting number of unique prediction classes.
+  * multi:softprob - multiclassification using softmax objective returning predicted class probabilities.
+* **eval.metric = (see below):**  metrics used to evaluate model accuracy.  Regression default is RMSE.  Classification default is error.
+  * mae - Mean Absolute Error (used in Regression)
+  * LogLoss - Negative loglikelihood (used in Classification)
+  * AUC - Area under curve (used in Classification)
+  * RMSE - Root Mean Square Error (used in Regression)
+  * error - Binary classification error rate [# wrong / # total]
+  * mlogloss - multiclass logloss (used in Classification)
+
+### Other Parameters
+* **verbose = 0,1,2:**  0 is no messages, 1 prints evaluation metric, 2 also prints the information about the tree
+* **watchlist = list(train=train,test=test):** allows you to feed a test set into the model so that the model can keep retesting itself on the test set.  This way you can measure the progress of learning.  This will help prevent overfitting and can define a stopping point when the model is optimized and no longer needs any more iterations.
 
 XGBoost produces a regression model.  In a binary classification model, the predictions will be probabilities that range from 0 < p < 1.  To interpret the prediction for the binary classification, you can set the probability to > .5, etc.
 
@@ -244,9 +308,6 @@ One Hot Encoding Representation would look like:
 
 *Note:  When possible, it is ideal to use the data.table instead of the data.frame.  data.table is 100% compliant with data.frames and its performance is much better.*
 
-For many machine learning algorithms, having highly correlated variables is not a good idea.  It can make predictions less accurate and makes interpreting the model almost impossible.  GLM's for example assume that features are uncorrelated.
-
-Decision tree algorithms, including boosted trees, are very robust to correlated features and one does not have to do anything to manage the correlations.
 
 *Note: You will want to either remove the ID field or NULL it out.*
 
@@ -354,6 +415,7 @@ xgb.save(model.xgboost,"model.xgboost")
 model.xgboost2 <-  xgb.load("model.xgboost")
 ```
 
+# Results
 
 ## Comparing Importance Results
 
@@ -393,7 +455,7 @@ corrplot(M,method="circle")
 ```
 
 
-#Appendix Data Dictionary
+#Appendix A. Data Dictionary
 
 MSSubClass: Identifies the type of dwelling involved in the sale.	
 
@@ -919,3 +981,38 @@ SaleCondition: Condition of sale
        Family	Sale between family members
        Partial	Home was not completed when last assessed (associated with New Homes)
        
+#Appendix B.  XGBoost Resources
+
+Introduction to Boosted Trees:
+
+http://xgboost.readthedocs.io/en/latest/model.html
+
+XGBoost R Tutorial can be found:
+
+http://xgboost.readthedocs.io/en/latest/R-package/xgboostPresentation.html
+
+Exploratory Data Analysis with XGBoost:
+
+http://xgboost.readthedocs.io/en/latest/R-package/discoverYourData.html
+
+Beginner's Tutorial to XGBoost:
+
+https://www.hackerearth.com/practice/machine-learning/machine-learning-algorithms/beginners-tutorial-on-xgboost-parameter-tuning-r/tutorial/
+       
+#Appendix C.  Preventing Overfitting
+
+There are 4 commonly used methods to prevent overfitting:
+
+1.  Cross-Validation:  Leave one sample out for in-time validation and the rest of the data used for training.
+
+2.  Early Stopping:  Provides guidance on how many iterations before the learner begins to overfit.
+
+3.  Pruning:  Removing nodes which add little predictive power to the model.
+
+4.  Regularization:  Introduces a cost term for bringing more features with the objective function.  
+
+For regularization, for linear regression we want to minimize the RSS (objective function) and we apply a penalty term to the objective function.  
+![*CART Example*](W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/Regularization.png)
+
+Optimizing lambda defines the trade-off between the prediction accuracy of the training sample and prediction accuracy of the hold out sample.
+
