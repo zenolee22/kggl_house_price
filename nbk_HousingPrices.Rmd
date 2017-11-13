@@ -23,7 +23,6 @@ The following notebook is designed to simply explore and learn practical machine
 9.  Appendix B.  XGBoost Resources
 10.  Appendix C.  Preventing Overfitting
 
-
 #Initialization
 
 Set Libraries
@@ -234,6 +233,11 @@ Decision tree algorithms, including boosted trees, are very robust to correlated
 For Classification problems, trees are grown to reduce misclassification rates in subsequent iterations.  
 
 For Regression problems, it builds a generalized linear model and optimizes it using regularization (L1, L2) and gradient descent.  Subsequent models are built on residuals (Actual - Predicted).  *Gradient Descent* is a method where a vector of weights (or coefficients), we want to minimize the partial derivatives to find the local minima of the RSS.  Simply put, we want to minimize the error by tuning the values of the coefficients.
+
+For regularization, for linear regression we want to minimize the RSS (objective function) and we apply a penalty term to the objective function.  
+![*CART Example*](W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/Regularization.png)
+
+Optimizing lambda defines the trade-off between the prediction accuracy of the training sample and prediction accuracy of the hold out sample.
 
 ## Utilizing the xgboost package
 
@@ -983,21 +987,29 @@ SaleCondition: Condition of sale
        
 #Appendix B.  XGBoost Resources
 
-Introduction to Boosted Trees:
+**Introduction to Boosted Trees:**
 
 http://xgboost.readthedocs.io/en/latest/model.html
 
-XGBoost R Tutorial can be found:
+**XGBoost R Tutorial can be found:**
 
 http://xgboost.readthedocs.io/en/latest/R-package/xgboostPresentation.html
 
-Exploratory Data Analysis with XGBoost:
+**Exploratory Data Analysis with XGBoost:**
 
 http://xgboost.readthedocs.io/en/latest/R-package/discoverYourData.html
 
-Beginner's Tutorial to XGBoost:
+**Beginner's Tutorial to XGBoost:**
 
 https://www.hackerearth.com/practice/machine-learning/machine-learning-algorithms/beginners-tutorial-on-xgboost-parameter-tuning-r/tutorial/
+
+**Full documentation on Parameters:**
+
+http://xgboost.readthedocs.io/en/latest//parameter.html
+
+**Complete Tutorial on Tree Based Modeling:**
+
+https://www.analyticsvidhya.com/blog/2016/04/complete-tutorial-tree-based-modeling-scratch-in-python/
        
 #Appendix C.  Preventing Overfitting
 
@@ -1011,8 +1023,5 @@ There are 4 commonly used methods to prevent overfitting:
 
 4.  Regularization:  Introduces a cost term for bringing more features with the objective function.  
 
-For regularization, for linear regression we want to minimize the RSS (objective function) and we apply a penalty term to the objective function.  
-![*CART Example*](W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/Regularization.png)
 
-Optimizing lambda defines the trade-off between the prediction accuracy of the training sample and prediction accuracy of the hold out sample.
 
