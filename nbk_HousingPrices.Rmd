@@ -1,9 +1,6 @@
 ---
 title: "Kaggle Housing Prices"
-output:
-  html_notebook: default
-  html_document: default
-  pdf_document: default
+output: html_notebook
 ---
 
 #Introduction
@@ -27,23 +24,26 @@ The following notebook is designed to simply explore and learn practical machine
 
 Set Libraries
 ```{r libraries, eval=TRUE, message=FALSE}
-library(data.table)
+library(data.table)# Data tables 
 library(plotly)    # Plots and Graphs
 library(Boruta)    # Runs a Boruta Feature Analysis
 library(dplyr)     # Data Manipulation
 library(corrplot)  # Correlation Plots
 library(xgboost)   # Runs Extreme Gradient Boosting
 library(Matrix)    # For sparse matrices
+library(shiny)     # For Layouts
+library(mlr)       # Machine Learning
+library(tidyr)     # Manual One Hot Encoding
 
 ```
 
 
 #Import Data
 ```{r Data, eval=TRUE}
-dir.data <- "W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/Data/"
+dir.data <- "C:/Zeno/R/House Prices/Data/"
 data.test <- read.csv(paste(dir.data,"test.csv",sep=""),stringsAsFactors = FALSE)
 data.train <- read.csv(paste(dir.data,"train.csv",sep=""), stringsAsFactors = FALSE)
-setwd("W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/")
+#setwd("W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/")
 ```
 
 
@@ -74,9 +74,37 @@ There are some obvious variables that should be excluded from the dataset, i.e. 
 
 Alley, PoolQC, Fence, and MiscFeature will be removed as they all have missing values > 80%.  FireplaceQU is questionable as ~50% of the data is missing.  
 
-*Note: Although xgboost should be able to handle the missing values, for efficiency, they should be excluded from further analysis.*
+No need to analyze columns that are all NULL, so let's remove them from the database.
+
+```{r rmv_Nulls, eval=TRUE, message=FALSE, warning=FALSE}
+#Copy the Train Data and Remove what we already don't need
+anchor.train <- data.train %>%
+  select(-SalePrice,-Alley,-PoolQC,-Fence,-MiscFeature,-FireplaceQu,-LotFrontage)
+
+# We remove SalePrice because we don't want the One Hot Encoding to consider it as a feature
+response.train <- data.train$SalePrice
+
+anchor.test <- data.test %>% select(-Alley,-PoolQC,-Fence,-MiscFeature,-FireplaceQu,-LotFrontage)
+#response.test <- data.test$SalePrice
+```
+
+Now we need to separate out the Numeric vs Categorical variables.  We do need to understand the variables as MBSubClass looks like a numerical variable.  But closer inspection shows that the integer values simply represent a housing type.  We do not want the Machine Learning model to assume there is an inherent ranking with those values.  We'll need to include them in the One-Hot Encoding.
+
+```{r Feature_Types, eval=TRUE}
+
+features <- sapply(anchor.train,typeof)
+
+features.category <- names(features[features == "character"])
+features.numeric <- names(features[features != "character"])
+features.numeric <- features.numeric[features.numeric != "MSSubClass"]
+
+features.category[length(features.category)+1] <- "MSSubClass"
+features.category[length(features.category)+1] <- "Id"
+```
 
 # Feature Engineering
+
+There are over 70 variables in the data set.  I want a more systematic approach to determine which variables I should be exploring deeper and including in the final model.
 
 ## Boruta Algorithm
 
@@ -108,7 +136,7 @@ Data Prep for Boruta Analysis
 field.ID <- "Id"
 field.Target <- "SalePrice"
 
-field.features <- setdiff(names(data.train),c(field.ID,field.Target))
+field.features <- setdiff(names(anchor.train),c(field.ID,field.Target))
 field.types <- sapply(field.features, function(x){class(data.train[[x]])})
 table(field.types)
 
@@ -131,7 +159,7 @@ for (x in field.attributes$character){
   explanatory.test[[x]][is.na(explanatory.test[[x]])] <- "MISSING"
 }
 
-rmvitems <- c("Alley","PoolQC","Fence","MiscFeature")
+#rmvitems <- c("PoolQC","MiscFeature","Alley","Fence","FireplaceQu","LotFrontage")
 
 #Remove features where the majority of the data is missing
 explanatory.train <- explanatory.train %>% select(-Alley,-PoolQC,-Fence,-MiscFeature)
@@ -143,45 +171,28 @@ field.attributes$character <- field.attributes$character[! field.attributes$char
 field.features <- field.features[! field.features %in% rmvitems]
 ```
 
-```{r Plot Histograms, eval=TRUE}
+```{r Clean_Nulls, eval=TRUE}
+# I don't want to taint the original copy of the data
+boruta.train <- anchor.train %>% select(-Id)
 
-plot_list <- htmltools::tagList()
-seq_count = 4
-
-for (i in seq(from=1,to=length(field.features),by=1))
+for (x in features.category[features.category != "Id"])
 {
-
-  p <- plot_ly() %>%
-     add_trace(x=data.train[,field.features[i]], type='histogram',alpha=.5, name=field.features[i]) %>%
-     layout(xaxis=list(title=field.features[i]))
-
-  plot_list[[i]] <- p
-
+  boruta.train[[x]][is.na(boruta.train[[x]])] <- "Missing"
 }
 
-lattice_list <- htmltools::tagList()
-
-for (i in seq(from=1,to=length(field.features),by=seq_count))
+for (x in features.numeric[features.numeric != "Id"])
 {
-  if (length(field.features) - i < seq_count)
-  {
-    lattice_list[[i]] <- subplot(plot_list[i:length(field.features)],nrows=2)
-  } else
-  {
-    lattice_list[[i]] <- subplot(plot_list[i:(i+seq_count-1)],nrows=2)
-  }
+  boruta.train[[x]][is.na(boruta.train[[x]])] <- -1
 }
-
-lattice_list
 
 ```
 
-```{r Running Boruta, eval=TRUE}
-set.seed(13)
 
-bor.results <- Boruta(explanatory.train,response,maxRuns = 101,doTrace = 0)
+```{r Running_Boruta, eval=TRUE}
+set.seed(123)
+
+bor.results <- Boruta(boruta.train,response.train,maxRuns = 101,doTrace = 0)
 ```
-
 
 Reviewing the Boruta Analysis Results
 
@@ -195,11 +206,139 @@ Plot of the Boruta Analysis
 plot(bor.results)
 ```
 
+Let's review the variables
+
 ```{r Get Boruta Results, eval=TRUE}
 results_df <- data.frame(attStats(bor.results))  #allStats is part of Boruta that summarizes the results into a table
-results_df[order(-results_df$meanImp),]  #Just sorting by importance
+
+results_df$feature <- factor(row.names(results_df),levels=unique(row.names(results_df))[order(results_df$meanImp,decreasing=FALSE)])
+
+f <- list(
+  family = "Courier New, monospace",
+  size = 16,
+  color = "#7f7f7f"
+)
+
+results_df <- results_df %>% arrange(desc(meanImp))
+
+results_df
 
 ```
+
+Some of the "important" variables intuitively makes sense, i.e. General Living Area, Overall Quality, etc.  We will review the variables that seem to be of questionable decision.
+
+```{r Plot_Features, eval=FALSE}
+nfeat = 45
+
+p <- results_df %>% 
+  plot_ly(y=~head(feature,n=nfeat)
+          ,x=~head(meanImp,n=nfeat)
+          ,type="bar"
+          ,orientation="h"
+          ,name="Boruta"
+          ,text=paste0("Decision: ",head(results_df$decision,nfeat))
+          ) %>%
+  layout(title="Boruta Feature Importance"
+         ,xaxis=list(title="Mean Importance"
+                     ,titlefont=f)
+         ,yaxis=list(title="Feature"
+                     ,titlefont=f)
+         ,margin=list(l=150,r=50,b=50,t=50, pad=3))
+
+fluidPage(
+  fluidRow(p)
+)
+
+```
+
+
+## Features Categorical {.tabset}
+
+```{r}
+sort(features.category)
+```
+
+```{r Hist_Categorical, eval=TRUE}
+
+plot_list <- htmltools::tagList()
+seq_count = 4
+
+for (i in seq(from=1,to=length(features.category),by=1))
+{
+  p <- plot_ly() %>%
+     add_trace(x=anchor.train[,features.category[i]], type='histogram',alpha=.5, name=features.category[i]) %>%
+     layout(xaxis=list(title=features.category[i]))
+
+  plot_list[[i]] <- p
+}
+
+lattice_list <- htmltools::tagList()
+
+for (i in seq(from=1,to=length(features.category),by=seq_count))
+{
+  if (length(features.category) - i < seq_count)
+  {
+    lattice_list[[i]] <- subplot(plot_list[i:length(features.category)],nrows=2)
+  } else
+  {
+    lattice_list[[i]] <- subplot(plot_list[i:(i+seq_count-1)],nrows=2)
+  }
+}
+
+lattice_list
+
+```
+
+What we are looking for are variables where the distribution is skewed.  Depending on the distribution, we'll have to determine how to handle it.
+
+  1.  Remove the feature from the analysis    
+  2.  Bin categories together
+  3.  Impute missing data with mean/median values
+
+
+### Street
+
+```{r warning=FALSE}
+
+anchor.train %>% group_by(Street) %>% summarize(Count=n()
+                                                ,Pct=n()/nrow(anchor.train))
+
+```
+
+There are only two variables with no opportunity to do anything to improve the significance of the variable.
+
+### Second Variable
+```{r warning=F}
+print("world")
+```
+
+
+## Features Numeric {.tabset}
+
+```{r}
+sort(features.numeric)
+```
+
+### First Variable
+
+```{r}
+print("Yoda")
+```
+
+
+
+```{r}
+head(explanatory.train)
+```
+
+
+# Frequency Distribution
+
+
+
+
+
+
 
 # Boosting
 
@@ -211,7 +350,7 @@ In Machine Learning, we talk of the relationship between simplicity and predicta
 
 XGBoost is a tree ensemble, which is a set of classification and regression trees (CART).  CART differs from decision trees in that decision trees only provide the decision values, whereas CART provides an associated score with each leaf.
 
-![*CART Example*](W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/twocart.png)
+![*CART Example*](C:/Zeno/R/House Prices/twocart.png)
 
 Random forests are also ensemble trees.  The only difference between Random Forests and XG Boost is how the model is trained.  To train the model, XG Boost uses an additive algorithm.  Fix what has been learned and add 1 new tree at a time.
 
@@ -235,7 +374,7 @@ For Classification problems, trees are grown to reduce misclassification rates i
 For Regression problems, it builds a generalized linear model and optimizes it using regularization (L1, L2) and gradient descent.  Subsequent models are built on residuals (Actual - Predicted).  *Gradient Descent* is a method where a vector of weights (or coefficients), we want to minimize the partial derivatives to find the local minima of the RSS.  Simply put, we want to minimize the error by tuning the values of the coefficients.
 
 For regularization, for linear regression we want to minimize the RSS (objective function) and we apply a penalty term to the objective function.  
-![*CART Example*](W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/Regularization.png)
+![*CART Example*](C:/Zeno/R/House Prices/Regularization.png)
 
 Optimizing lambda defines the trade-off between the prediction accuracy of the training sample and prediction accuracy of the hold out sample.
 
@@ -310,8 +449,13 @@ One Hot Encoding Representation would look like:
   
   [1,0]
 
-*Note:  When possible, it is ideal to use the data.table instead of the data.frame.  data.table is 100% compliant with data.frames and its performance is much better.*
+But one-hot encoding also presents two problems that are more particular to tree-based models:
 
+* The resulting sparsity virtually ensures that continuous variables are assigned higher feature importance.
+
+* A single level of a categorical variable must meet a very high bar in order to be selected for splitting early in the tree building. This can degrade predictive performance.
+
+*Note:  When possible, it is ideal to use the data.table instead of the data.frame.  data.table is 100% compliant with data.frames and its performance is much better.*
 
 *Note: You will want to either remove the ID field or NULL it out.*
 
@@ -321,7 +465,7 @@ One Hot Encoding Representation would look like:
 data.train.sparse <- explanatory.train[field.attributes$integer]
 data.test.sparse <- explanatory.test[field.attributes$integer]
 
-head(sparse.model.matrix(explanatory.train))
+#head(sparse.model.matrix(explanatory.train))
 
 # One Hot Encode Train
 for (j in 1:length(field.attributes$character))
@@ -357,55 +501,220 @@ for (j in 1:length(field.attributes$character))
 
 ```
 
+**tidyr One Hot Encoding**
 
 
-```{r XGBoosting, eval=TRUE}
 
-# using xgboost package to create the matrix, but you don't have to use the xgboost matrix
-#dtrain=xgb.DMatrix(as.matrix(explanatory[,field.attributes$integer]), label=response)
-dtrain=xgb.DMatrix(as.matrix(data.train.sparse), label=response)
-dtest=xgb.DMatrix(as.matrix(data.test.sparse[,field.attributes$integer]))
+
+```{r}
+features.numeric
+```
+
+
+# Machine Stuff
+
+Now that the variables are separated between Numerical and Categorical, we can One-Hot encode the categorical variables.
+
+```{r One_Hot, eval=TRUE}
+# First one-hot encode the categorical variables
+anchor.train.encoded <- anchor.train[,features.category] %>%
+  gather(variable, value, -(Id)) %>%
+  unite(comb_header, variable, value) %>%
+  mutate(value=1) %>%
+  dcast(Id~comb_header)
+
+# If not 1, then it is definitely 0
+anchor.train.encoded[is.na(anchor.train.encoded)] <- 0
+anchor.train.encoded <- left_join(anchor.train.encoded, anchor.train[features.numeric], by="Id") %>% select(-Id)
+
+#anchor.train.encoded <- subset(anchor.train.encoded, select=-c(Id))
+
+anchor.train.encoded <- cbind(anchor.train.encoded, response.train)
+
+colnames(anchor.train.encoded) <- gsub("[^[:alnum:]]", "_",colnames(anchor.train.encoded))
+
+for(i in 1:ncol(anchor.train.encoded)){
+  anchor.train.encoded[is.na(anchor.train.encoded[,i]), i] <- mean(anchor.train.encoded[,i], na.rm = TRUE)
+}
+
+# Prep the Test data the same way
+anchor.test.encoded <- anchor.test[,features.category] %>%
+  gather(variable, value, -(Id)) %>%
+  unite(comb_header, variable, value) %>%
+  mutate(value=1) %>%
+  dcast(Id~comb_header)
+
+# If not 1, then it is definitely 0
+anchor.test.encoded[is.na(anchor.test.encoded)] <- 0
+anchor.test.encoded <- left_join(anchor.test.encoded, anchor.test[features.numeric], by="Id") %>% select(-Id)
+
+colnames(anchor.test.encoded) <- gsub("[^[:alnum:]]", "_",colnames(anchor.test.encoded))
+
+for(i in 1:ncol(anchor.test.encoded)){
+  anchor.test.encoded[is.na(anchor.test.encoded[,i]), i] <- mean(anchor.test.encoded[,i], na.rm = TRUE)
+}
+
+
+```
+
+> Predictions from the MLR (and other xgboost packages) cannot make predictions when the columns are not consistent.  i.e. Train and Test must have the same columns used between both datasets.  If not, the output basically defaults to the average for all rows.  Even though it will make accurate predictions on the training set if you feed it back into the model for predictions.
+
+```{r Consistent_Data, eval=TRUE}
+#Use Only Columns that are available in Test after 
+anchor.train.encoded.cleaned <- anchor.train.encoded[colnames(anchor.train.encoded) %in% colnames(anchor.test.encoded)]
+
+
+#Filter out anything not used by Train
+anchor.test.encoded.cleaned <- anchor.test.encoded[colnames(anchor.test.encoded) %in% colnames(anchor.train.encoded.cleaned)]
+
+anchor.train.encoded.cleaned <- cbind(anchor.train.encoded.cleaned, response.train)
+colnames(anchor.train.encoded.cleaned)
+```
+
+
+```{r XGBoost_Default, eval=FALSE}
+
+dtrain <- xgb.DMatrix(as.matrix(anchor.train.encoded.cleaned),label=response.train)
+dtest <- xgb.DMatrix(as.matrix(anchor.test.encoded.cleaned))
 
 #xgboost parameters
 xgb_params = list(
-  seed = 0,
-  colsample_bytree = 0.5,
-  subsample = 0.8,
-  eta = 0.02, 
+  booster="gbtree",
   objective = 'reg:linear',
-  max_depth = 12,
+  colsample_bytree = 0.583,
+  subsample = 0.997,
+  eta = 0.291, 
+  max_depth = 8,
   alpha = 1,
-  gamma = 2,
-  min_child_weight = 1,
-  base_score = 7.76
+  gamma = 25,
+  min_child_weight = 2.39
+  #base_score = 7.76
 )
 
-best_n_rounds = 100
+best_n_rounds = 396
 
 model.xgboost = xgb.train(xgb_params
                           ,data=dtrain
-                          #,nfolds = 5  #Cross Validation
-                          ,nthread = 2
+                          ,nfolds = 10  #Cross Validation
+                          #,nthread = 2
+                          ,showsd=T
                           #,max.depth = 10
                           ,nrounds = as.integer(best_n_rounds)
                           #,verbose = 1
                           #,watchlist=watchlist
                           #,eval.metric = "logloss"
-                          #,eval.metric = "error"
                           )
 
 # Save the predictions on Test data
 prediction <- predict(model.xgboost,dtest)
-
 importance_matrix <- xgb.importance(feature_names=names(data.train.sparse), model=model.xgboost)
-
 xgb.plot.importance(importance_matrix=importance_matrix)
+
+write.csv(prediction,  paste0(dir.data,"default.csv"))
+```
+
+# Machine Learning with MLR
+
+https://www.kaggle.com/aniruddhachakraborty/lasso-gbm-xgboost-top-20-0-12039-using-r
+
+```{r}
+
+#blah <- anchor.train.encoded[colnames(anchor.train.encoded) %in% colnames(anchor.test.encoded)]
+#blah2 <- anchor.test.encoded[colnames(anchor.test.encoded) %in% colnames(blah)]
+
+#blah <- subset(anchor.train.encoded,select=c(OverallQual,GrLivArea,TotalBsmtSF,response_train))
+
+
+mlrn.traintask <- makeRegrTask(data=anchor.train.encoded.cleaned,target="response.train")
+
+#mlrn.traintask <- makeRegrTask(data=anchor.train.encoded,target="response_train")
+
+#mlrn.traintask <- createDummyFeatures(mlrn.traintask)
+
+mlrn.lrn <- makeLearner("regr.xgboost")
+
+mlrn.lrn$par.vals = list(
+  #nthread = 8   #Commented Out so that it uses the max
+  nrounds = 1000
+  #,alpha = 1
+  ,print_every_n = 100
+  ,objective = "reg:linear"
+  ,early_stopping_rounds = 10  # Helps to optimize efficiency since we have high number of rounds
+  ,eval.metric = "rmse"
+  #,feval=huber
+  #,maximize=F
+)
+
+mlrn.params <- makeParamSet( 
+  makeDiscreteParam("booster",values = c("gbtree"))
+  ,makeIntegerParam("gamma",lower=0,upper=25)
+  ,makeNumericParam("lambda",lower=1,upper=5)
+  ,makeIntegerParam("max_depth",lower = 3,upper = 10)
+  ,makeNumericParam("eta",lower=0.05,upper=0.3)  # Should be tuned with n rounds
+  ,makeNumericParam("min_child_weight",lower = 1L,upper = 5L)
+  ,makeNumericParam("subsample",lower = 0.3,upper = 1)
+  ,makeNumericParam("colsample_bytree",lower = 0.3,upper = 1)
+)
+
+mlrn.rdesc <- makeResampleDesc("CV",iters=10)  # Performs n-fold cross validation
+mlrn.ctrl <- makeTuneControlRandom(maxit = 30)  # Optimization Algorithm
+
 
 ```
 
 ```{r}
-#Outputs Tree
-#xgb.dump(model.xgboost,with_stats=T,fname="W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/tree.txt")
+Sys.time()
+mytune <- tuneParams(learner = mlrn.lrn
+                     ,task = mlrn.traintask
+                     ,resampling = mlrn.rdesc
+                     ,par.set = mlrn.params
+                     ,control = mlrn.ctrl
+)
+Sys.time()
+```
+
+```{r}
+#colnames(anchor.test.encoded)
+
+anchor.test.encoded.cleaned$response.train <- 0
+#blah2 <- subset(anchor.test.encoded,select=c(GrLivArea,TotalBsmtSF,OverallQual,response_train))
+#mlrn.testtask <- makeRegrTask(data=anchor.test.encoded,target="response_train")
+mlrn.testtask <- makeRegrTask(data=anchor.test.encoded.cleaned,target="response.train")
+#mlrn.testtask <- createDummyFeatures(mlrn.testtask)
+```
+
+
+```{r}
+mlrn.tuned_param <- setHyperPars(learner=mlrn.lrn
+                                 ,par.vals=mytune$x)
+
+model <- train(mlrn.tuned_param, mlrn.traintask)
+
+prediction.tuned <- predict(model, mlrn.testtask)
+prediction <- predict(model, mlrn.traintask)
+
+prediction.tuned
+prediction
+
+write.csv(prediction.tuned,  paste0(dir.data,"final_7.csv"))
+```
+
+```{r}
+importance_matrix_tuned <- getFeatureImportance(model)
+xgb_linear <- data.frame(Feature=names(importance_matrix_tuned$res),Importance=t(importance_matrix_tuned$res))
+xgb_linear$Feature <- factor(xgb_linear$Feature,levels=unique(xgb_linear$Feature)[order(xgb_linear$Importance,decreasing=FALSE)])
+xgb_linear <- xgb_linear %>% arrange(desc(Importance))
+
+xgb_linear
+
+write.csv(xgb_linear,paste0(dir.data,"important.csv"))
+```
+
+
+```{r}
+model$learner$par.vals
+
+learner=mlrn.lrn
 
 ```
 
@@ -437,7 +746,7 @@ secondaxis <- list(overlaying="y",side="right",title="XGBoost")
 p_boruta <- plot_ly(x=head(results_df[,"meanImp"],n=nfeats),y=head(results_df$feature,n=nfeats), type="bar", orientation = "h",name="Boruta")
 p_xgb <- plot_ly(x=head(xgb_df$Gain,n=nfeats),y=head(xgb_df$Feature,n=nfeats),type="bar",orientation="h", name="XGBoost") %>% layout(title="Boruta vs XG Boost - Feature Importance")
 
-p_compare <- subplot(p_boruta,p_xgb)
+p_compare <- subplot(p,p_xgb)
 
 #htmlwidgets::saveWidget(p_compare, "Boruta vs XGBoost Feature Importance.html")
 
