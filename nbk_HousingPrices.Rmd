@@ -20,7 +20,15 @@ The following notebook is designed to simply explore and learn practical machine
 9.  Appendix B.  XGBoost Resources
 10.  Appendix C.  Preventing Overfitting
 
-#Initialization
+https://www.kaggle.com/aniruddhachakraborty/lasso-gbm-xgboost-top-20-0-12039-using-r
+
+https://www.kaggle.com/couyang/cannabis-interactive-eda-drilldown-plus-nlp
+
+https://towardsdatascience.com/how-to-handle-missing-data-8646b18db0d4
+
+https://www.kaggle.com/serigne/stacked-regressions-top-4-on-leaderboard
+
+# Initialization
 
 Set Libraries
 ```{r libraries, eval=TRUE, message=FALSE}
@@ -34,11 +42,25 @@ library(Matrix)    # For sparse matrices
 library(shiny)     # For Layouts
 library(mlr)       # Machine Learning
 library(tidyr)     # Manual One Hot Encoding
+library(skimr)     # Summary Statistics
+library(DMwR)      # KNN Data Imputation
+library(mice)      # Multiple Imputation
+library(VIM)       # Visualizations
+library(caret)
+library(glmnet)
+library(highcharter)
+library(gridExtra)
+
+# For Skewness
+library(MASS)      # Box Cox Transformation
+library(moments)
+
+#install.packages("moments",lib="C:/Zeno/R/libraries/")
 
 ```
 
 
-#Import Data
+# Import Data
 ```{r Data, eval=TRUE}
 dir.data <- "C:/Zeno/R/House Prices/Data/"
 data.test <- read.csv(paste(dir.data,"test.csv",sep=""),stringsAsFactors = FALSE)
@@ -47,51 +69,179 @@ data.train <- read.csv(paste(dir.data,"train.csv",sep=""), stringsAsFactors = FA
 ```
 
 
-#Exploratory Analysis
+# Data Summary
 
 ```{r}
 summary(data.train)
 ```
 
 ```{r}
-str(data.train)
+data.train %>% skim() %>% kable()
 ```
 
-Same as the histogram.  This is just a frequency count.  Just placed here as reference on how to do a frequency count.
 ```{r}
-data.train %>% group_by(PoolQC) %>% tally()
+
+# High Chart driven by column names.  Name, y, and drilldown
+
+df <- data.train %>% 
+  dplyr::group_by(name=TotRmsAbvGrd,drilldown=TotRmsAbvGrd) %>% 
+  summarize(y=n())
+
+df_drill <- data.train %>% 
+  dplyr::group_by(TotRmsAbvGrd, FullBath) %>%
+  dplyr::summarize(y=n()) %>%
+  dplyr::group_by(name=TotRmsAbvGrd,id=TotRmsAbvGrd) %>%
+  do(data=list_parse(
+    mutate(.,name=FullBath, drilldown=paste(TotRmsAbvGrd, FullBath, sep=":")) %>%
+      group_by(name,drilldown) %>%
+      summarise(y=sum(y)) %>%
+      dplyr::select(name, y, drilldown)
+  ))
+
+h <- highchart() %>% 
+  hc_chart(type="column") %>%
+  hc_xAxis(type="category") %>%
+  hc_add_series(name="Count", data=df, colorByPoint=1) %>%
+  hc_drilldown(
+    allowPointDrilldown=TRUE,
+    series=list_parse(df_drill)
+  ) %>%
+  hc_legend(enabled=F) %>%
+  hc_add_theme(hc_theme_darkunica()) %>%
+  hc_title(text="Count by Rooms and Baths")
+
+#High Charts wont appear in a notebook as is, so I need to embed it in a Shiny Page
+
+fluidPage(
+  fluidRow(
+    h
+  )
+)
+
 ```
+
+# Outliers
+
+```{r}
+plot_ly(type="scatter"
+        ,x=data.train$GrLivArea
+        ,y=data.train$SalePrice)
+
+```
+
+```{r Rmv_Outliers, eval=TRUE}
+anchor.train <- data.train %>% filter(GrLivArea < 4600)
+
+plot_ly(anchor.train, type="scatter",x=~GrLivArea, y=~SalePrice)
+
+```
+
+# Skewness
+
+Sale Price is the target/response variable, so let's do a little analysis on it.
+
+```{r Density_Plot, eval=TRUE}
+h1 <- hchart(density(anchor.train$SalePrice),type="area",color="red", name="Sale Price")
+h2 <- hchart(density(log(anchor.train$SalePrice)),type="area",color="blue",name="Log of Sale Price")
+
+fluidPage(
+  fluidRow(column(6,h1)
+           ,column(6,h2))
+)
+```
+
+We can see that Sale Price is skewed, where as the log transform of the Sale Price looks to be more normally distributed.
+
+```{r}
+p1 <- ggplot(anchor.train, aes(sample=SalePrice)) + 
+  stat_qq(colour="red") + 
+  stat_qq_line(colour="blue",size=1.5) + 
+  ggtitle("Normal Q-Q Plot: Sale Price")
+
+p2 <- ggplot(anchor.train, aes(sample=log(SalePrice))) + 
+  stat_qq(colour="red") + 
+  stat_qq_line(colour="blue",size=1.5) + 
+  ggtitle("Normal Q-Q Plot: Log of Sale Price")
+
+grid.arrange(p1, p2, ncol=2)
+```
+
+Looking at the QQ Plot, we can confirm that the transform is definitely more normally distributed.
+
+# Feature Engineering
 
 ## Missing Values?
+
+### Background
+
+It seems that the general consensus is that there is no good way to handle missing values.  There may be instances where leaving the data row out when it has values missing will be a good choice, however, you might be still depriving the dataset of valuable information.  On the flip side, depending on how you impute the missing data, you may be introducing bias into the data.  
+
+In general, missing values can be bucketed into 3 categories:
+
+  1.  **Missing at Random (MAR):**  Data points that are missing not related to the missing data, but related to some of the observed data.
+  2.  **Missing Completely at Random (MCAR):**  Missing data has nothing to do with the hypothesis or values of the other variables.
+  3.  **Missing not at Random (MNAR):**  Missing value is dependent on some hypothetical value or dependent on some other variable.
+
+In cases 1 & 2, it is safe to delete the data with the missing values, dependent on the occurrences.  However,in case 3, removing the data can introduce bias into the model.
+
+>*Note: Imputation does not necessarily mean better results*
+
+### Imputing Missing Data: Categorical vs Numerical
+
+Categorical:
+  1.  Mode Imputation, but it will definitely introduce bias
+  2.  Missing values can be treated as a separate category, which is the simplest method
+  3.  Prediction models.  Here you divide the data into 2 sets: one with no missing values (train) and the data with missing values (test).  Then use logistic regression or ANOVA for prediction.
+  4.  Multiple Imputation
+
+Numerical:
+  1.  Mean, Mode, Median: Disadvantage is that it reduces the variance of the data
+  2.  Linear Regression:  Use the complete cases to build a regression model to predict the missing values.  The disadvantages is that the predicted values fit together "too well" and standard error is deflated.  One is also assuming there is a linear relationship between variables, which there may not be one.
+  3.  KNN:  It's simple to understand and easy to implement.  The non-parametric nature of KNN gives it an advantage where data may be highly "unusual".  Disadvantage is that analyzing large data sets can be time consuming.  Also, KNN be severly degraded with high dimensionality as there is little difference between the nearest and farthest neighbors.
+  4.  Multiple Imputation:  More detail below
+
+### Multiple Imputation
+
+Multiple imputation is a statistical technique for analyzing incomplete data sets, that is, data sets for which some entries are missing. Application of the technique requires three steps: imputation, analysis and pooling. The figure illustrates these steps.
+
+  1.  **Imputation:** Impute (=fill in) the missing entries of the incomplete data sets, not once, but m times (m=3 in the figure). Imputed values are drawn for a distribution (that can be different for each missing entry). This step results is m complete data sets. 
+  2.  **Analysis:** Analyze each of the m completed data sets. This step results in m analyses.
+  3.  **Pooling:** Integrate the m analysis results into a final result. Simple rules exist for combining the m analyses.
+
+![*Imputation Diagram*](C:/Zeno/R/House Prices/Imputation.png)
+
+There are numerous ways to do the multiple imputation.  From the `mice` package, we have the following methods.  
+
+```{r}
+methods(mice)
+```
 
 % of data that is NULL/NA by column
 ```{r}
 #sapply(data.train,function(x) sum(x=="NULL"))  # Use when Null
-round(sapply(data.train,function(x) sum(is.na(x))) / nrow(data.train) * 100,digits=3)   # Use when NA
+round(sapply(anchor.train,function(x) sum(is.na(x))) / nrow(anchor.train) * 100,digits=3)   # Use when NA
 ```
 
-There are some obvious variables that should be excluded from the dataset, i.e. features with > 80% of missing data.  
+Some of the variables 
 
-Alley, PoolQC, Fence, and MiscFeature will be removed as they all have missing values > 80%.  FireplaceQU is questionable as ~50% of the data is missing.  
-
-No need to analyze columns that are all NULL, so let's remove them from the database.
+**Make a copy of the original dataset**
 
 ```{r rmv_Nulls, eval=TRUE, message=FALSE, warning=FALSE}
-#Copy the Train Data and Remove what we already don't need
-anchor.train <- data.train %>%
-  select(-SalePrice,-Alley,-PoolQC,-Fence,-MiscFeature,-FireplaceQu,-LotFrontage)
-
 # We remove SalePrice because we don't want the One Hot Encoding to consider it as a feature
-response.train <- data.train$SalePrice
+response.train <- log(anchor.train$SalePrice)
 
-anchor.test <- data.test %>% select(-Alley,-PoolQC,-Fence,-MiscFeature,-FireplaceQu,-LotFrontage)
-#response.test <- data.test$SalePrice
+#Copy the Train Data and separate out the response variable
+anchor.train <- anchor.train %>% dplyr::select(-SalePrice) #, -Alley, -PoolQC, -Fence, -MiscFeature, -FireplaceQu)
+
+anchor.test <- data.test # %>% select(-Alley, -PoolQC, -Fence, -MiscFeature, -FireplaceQu)
+
+anchor <- rbind(anchor.train, anchor.test)
+
 ```
 
-Now we need to separate out the Numeric vs Categorical variables.  We do need to understand the variables as MBSubClass looks like a numerical variable.  But closer inspection shows that the integer values simply represent a housing type.  We do not want the Machine Learning model to assume there is an inherent ranking with those values.  We'll need to include them in the One-Hot Encoding.
+Now we need to separate out the Numeric vs Categorical variables.  We do need to understand the variables as MBSubClass looks like a numerical variable, but closer inspection shows that the integer values simply represent a housing type.  We do not want the Machine Learning model to assume there is an inherent ranking with those values.  We'll need to include them in the One-Hot Encoding.
 
 ```{r Feature_Types, eval=TRUE}
-
 features <- sapply(anchor.train,typeof)
 
 features.category <- names(features[features == "character"])
@@ -100,9 +250,391 @@ features.numeric <- features.numeric[features.numeric != "MSSubClass"]
 
 features.category[length(features.category)+1] <- "MSSubClass"
 features.category[length(features.category)+1] <- "Id"
+
+anchor.train <- anchor.train %>% mutate(MSSubClass=as.character(MSSubClass))
+anchor.test <- anchor.test %>% mutate(MSSubClass=as.character(MSSubClass))
+
 ```
 
-# Feature Engineering
+
+## Imputation of Categorical Data {.tabset}
+
+```{r}
+# Find all Categorical Variables that have missing values
+sapply(anchor.train[features.category], function(x) sum(is.na(x))) != 0
+```
+
+### PoolQC
+
+```{r}
+anchor.train <- anchor.train %>% mutate(PoolQC=ifelse(is.na(PoolQC),"None",PoolQC))
+anchor.test <- anchor.test %>% mutate(PoolQC=ifelse(is.na(PoolQC),"None",PoolQC))
+
+anchor.train %>% group_by(PoolQC) %>% summarize(Count=n())
+```
+
+### FireplaceQu
+
+```{r}
+anchor.train <- anchor.train %>% mutate(FireplaceQu=ifelse(is.na(FireplaceQu),"None",FireplaceQu))
+anchor.test <- anchor.test %>% mutate(FireplaceQu=ifelse(is.na(FireplaceQu),"None",FireplaceQu))
+
+anchor.train %>% group_by(FireplaceQu) %>% summarize(Count=n())
+```
+
+
+### Alley
+
+```{r}
+anchor.train <- anchor.train %>% mutate(Alley=ifelse(is.na(Alley),"None",Alley))
+anchor.test <- anchor.test %>% mutate(Alley=ifelse(is.na(Alley),"None",Alley))
+
+anchor.train %>% group_by(Alley) %>% summarize(Count=n())
+```
+
+### MiscFeature
+
+```{r}
+anchor.train <- anchor.train %>% mutate(MiscFeature=ifelse(is.na(MiscFeature),"None",MiscFeature))
+anchor.test <- anchor.test %>% mutate(MiscFeature=ifelse(is.na(MiscFeature),"None",MiscFeature))
+
+anchor.train %>% group_by(MiscFeature) %>% summarize(Count=n())
+```
+
+### Fence
+
+```{r}
+anchor.train <- anchor.train %>% mutate(Fence=ifelse(is.na(Fence),"None",Fence))
+anchor.test <- anchor.test %>% mutate(Fence=ifelse(is.na(Fence),"None",Fence))
+
+anchor.train %>% group_by(Fence) %>% summarize(Count=n())
+```
+
+
+### MasVnrType
+
+MasVnrType has a "None" category as well as some NULL data.  Here I will just group the NULLs in with the "None" category
+
+```{r}
+anchor.train <- anchor.train %>% mutate(MasVnrType=ifelse(is.na(MasVnrType),"None",MasVnrType))
+anchor.test <- anchor.test %>% mutate(MasVnrType=ifelse(is.na(MasVnrType),"None",MasVnrType))
+  
+anchor.train %>% group_by(MasVnrType) %>% summarize(Count=n())
+```
+
+### BsmtQual
+
+```{r}
+anchor.train <- anchor.train %>% mutate(BsmtQual=ifelse(is.na(BsmtQual),"None",BsmtQual))
+anchor.test <- anchor.test %>% mutate(BsmtQual=ifelse(is.na(BsmtQual),"None",BsmtQual))
+
+anchor.train %>% group_by(BsmtQual) %>% summarize(Count=n())
+```
+
+### BsmtCond
+
+```{r}
+anchor.train <- anchor.train %>% mutate(BsmtCond=ifelse(is.na(BsmtCond),"None",BsmtCond))
+anchor.test <- anchor.test %>% mutate(BsmtCond=ifelse(is.na(BsmtCond),"None",BsmtCond))
+
+anchor.train %>% group_by(BsmtCond) %>% summarize(Count=n())
+```
+
+### BsmtExposure  
+
+```{r}
+anchor.train <- anchor.train %>% mutate(BsmtExposure=ifelse(is.na(BsmtExposure),"None",BsmtExposure))
+anchor.test <- anchor.test %>% mutate(BsmtExposure=ifelse(is.na(BsmtExposure),"None",BsmtExposure))
+
+anchor.train %>% group_by(BsmtExposure) %>% summarize(Count=n())
+```
+
+### BsmtFinType1  
+
+```{r}
+anchor.train <- anchor.train %>% mutate(BsmtFinType1=ifelse(is.na(BsmtFinType1),"None",BsmtFinType1))
+anchor.test <- anchor.test %>% mutate(BsmtFinType1=ifelse(is.na(BsmtFinType1),"None",BsmtFinType1))
+
+anchor.train %>% group_by(BsmtFinType1) %>% summarize(Count=n())
+```
+
+### BsmtFinType2
+
+```{r}
+anchor.train <- anchor.train %>% mutate(BsmtFinType2=ifelse(is.na(BsmtFinType2),"None",BsmtFinType2))
+anchor.test <- anchor.test %>% mutate(BsmtFinType2=ifelse(is.na(BsmtFinType2),"None",BsmtFinType2))
+
+anchor.train %>% group_by(BsmtFinType2) %>% summarize(Count=n())
+```
+
+### Electrical
+
+```{r}
+anchor.train <- anchor.train %>% mutate(Electrical=ifelse(is.na(Electrical),"SBrkr",Electrical))
+anchor.test <- anchor.test %>% mutate(Electrical=ifelse(is.na(Electrical),"SBrkr",Electrical))
+
+anchor.train %>% group_by(Electrical) %>% summarize(Count = n())
+
+```
+
+### GarageType  
+
+```{r}
+anchor.train <- anchor.train %>% mutate(GarageType=ifelse(is.na(GarageType),"None",GarageType))
+anchor.test <- anchor.test %>% mutate(GarageType=ifelse(is.na(GarageType),"None",GarageType))
+
+anchor.train %>% group_by(GarageType) %>% summarize(Count = n())
+```
+
+### GarageFinish
+
+```{r}
+anchor.train <- anchor.train %>% mutate(GarageFinish=ifelse(is.na(GarageFinish),"None",GarageFinish))
+anchor.test <- anchor.test %>% mutate(GarageFinish=ifelse(is.na(GarageFinish),"None",GarageFinish))
+
+anchor.train %>% group_by(GarageFinish) %>% summarize(Count = n())
+```
+
+### GarageQual    
+```{r}
+anchor.train <- anchor.train %>% mutate(GarageQual=ifelse(is.na(GarageQual),"None",GarageQual))
+anchor.test <- anchor.test %>% mutate(GarageQual=ifelse(is.na(GarageQual),"None",GarageQual))
+
+anchor.train %>% group_by(GarageQual) %>% summarize(Count = n())
+```
+
+### GarageCond
+```{r}
+anchor.train <- anchor.train %>% mutate(GarageCond=ifelse(is.na(GarageCond),"None",GarageCond))
+anchor.test <- anchor.test %>% mutate(GarageCond=ifelse(is.na(GarageCond),"None",GarageCond))
+
+anchor.train %>% group_by(GarageCond) %>% summarize(Count = n())
+```
+
+
+### YrSold &  MoSold
+
+We want to move the inherent ranking of the Year and Month sold by changing them from integer to character values.
+
+```{r}
+features.numeric <- features.numeric[features.numeric != "YrSold"]
+features.numeric <- features.numeric[features.numeric != "MoSold"]
+
+features.category[length(features.category)+1] <- "YrSold"
+features.category[length(features.category)+1] <- "MoSold"
+
+anchor.train$YrSold <- as.character(anchor.train$YrSold)
+anchor.train$MoSold <- as.character(anchor.train$MoSold)
+
+anchor.test$YrSold <- as.character(anchor.test$YrSold)
+anchor.test$MoSold <- as.character(anchor.test$MoSold)
+
+anchor.train %>% group_by(YrSold, MoSold) %>% summarize(Count=n()) 
+
+```
+
+
+### OverallQual & OverallCond
+
+```{r}
+#features.numeric <- features.numeric[features.numeric != "OverallQual"]
+#features.numeric <- features.numeric[features.numeric != "OverallCond"]
+
+#features.category[length(features.category)+1] <- "OverallQual"
+#features.category[length(features.category)+1] <- "OverallCond"
+
+#anchor.train$OverallQual <- as.character(anchor.train$OverallQual)
+#anchor.train$OverallCond <- as.character(anchor.train$OverallCond)
+
+#anchor.test$OverallQual <- as.character(anchor.test$OverallQual)
+#anchor.test$OverallCond <- as.character(anchor.test$OverallCond)
+
+#anchor.train %>% group_by(OverallQual, OverallCond) %>% summarize(Count=n())
+
+```
+
+
+## Imputation of Numerical Data {.tabset}
+
+We are starting with the **Predictive Mean Matching** method.  This is a semi-parametric appraoch that fills in the missing values by randomly selecting from the observed donor values from an observation whose regression-predicted values are closest to the regression-predicted value for the missing value from the simulated regression model.  This ensures that the imputed values are plausible.
+
+```{r}
+# Find all Categorical Variables that have missing values
+sapply(anchor.train[features.numeric], function(x) sum(is.na(x))) != 0
+```
+
+```{r}
+aggr_plot <- aggr(anchor.train[c("LotFrontage","MasVnrArea","GarageYrBlt")], col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(data), cex.axis=.7, gap=3, ylab=c("Histogram of missing data","Pattern"))
+```
+
+
+### LotFrontage
+
+```{r}
+
+imp.train <- mice(anchor.train[c("LotFrontage","MasVnrArea","GarageYrBlt")]
+     ,method="pmm"
+     ,m=5
+     ,maxit=50
+     ,seed=1212)
+
+imp.test <- mice(anchor.test[c("LotFrontage","MasVnrArea","GarageYrBlt")]
+     ,method="pmm"
+     ,m=5
+     ,maxit=50
+     ,seed=1587)
+
+```
+
+```{r}
+
+imp.train$imp$LotFrontage
+
+imp.train$imp$LotFrontage
+
+imp$imp$LotFrontage
+
+imp$imp$GarageYrBlt
+```
+
+```{r}
+imp.train.completed <- complete(imp.train)
+imp.test.completed <- complete(imp.test)
+```
+
+Replace the original columns with the imputed ones and check to see if there are anymore NA's.
+
+```{r}
+
+anchor.train <- anchor.train %>% dplyr::select(-LotFrontage, -GarageYrBlt, -MasVnrArea)
+anchor.train <- cbind(anchor.train, imp.train.completed)
+
+anchor.test <- anchor.test %>% dplyr::select(-LotFrontage, -GarageYrBlt, -MasVnrArea)
+anchor.test <- cbind(anchor.test, imp.test.completed)
+
+colnames(anchor.test)
+sapply(anchor.train, function(x) sum(is.na(x)))
+```
+
+```{r}
+anchor.test %>% dplyr::select(LotFrontage)
+```
+
+
+### BsmtFinSF1 & BsmtFinSF2
+
+Based on the definition, it appears that if a basement has multiple finishes, it uses a 2nd variable to track the square footage of the next finish.  If you do not combine these variables, you don't have an apples to apples comparison to homes with a single basement finish
+
+```{r}
+
+anchor.train %>% select(BsmtFinSF1, BsmtFinSF2)
+
+anchor.train$BsmtTotalSF <- anchor.train$BsmtFinSF1 + anchor.train$BsmtFinSF2
+anchor.test$BsmtTotalSF <- anchor.test$BsmtFinSF1 + anchor.test$BsmtFinSF2
+
+anchor.train <- anchor.train %>% dplyr::select(-BsmtFinSF1, -BsmtFinSF2)
+anchor.test <- anchor.test %>% dplyr::select(-BsmtFinSF1, -BsmtFinSF2)
+
+features.numeric <- features.numeric[features.numeric != "BsmtFinSF1"]
+features.numeric <- features.numeric[features.numeric != "BsmtFinSF2"]
+
+features.numeric[length(features.numeric)+1] <- "BsmtTotalSF"
+
+```
+
+### Skewed Features
+
+```{r}
+
+fluidPage(
+  fluidRow(hchart(density(anchor.train$GrLivArea),type="area",color="red", name="General Living Area"))
+)
+
+skewed_features <- sapply(features.numeric,function(x) {
+  skewness(anchor.train[[x]],na.rm=TRUE)
+})
+
+# Filter for features with skewness > .75
+skewed_features <- skewed_features[abs(skewed_features) > .75]
+
+anchor.test[names(skewed_features)]
+
+names(skewed_features)
+
+# Perform a Box-Cox transformation on the skewed variables
+for (x in names(skewed_features)) {
+  bc.train <- BoxCoxTrans(anchor.train[[x]], lambda=.15)
+  anchor.train[[x]] <- predict(bc.train, anchor.train[[x]])
+  
+  bc.test <- BoxCoxTrans(anchor.test[[x]], lambda=.15)
+  anchor.test[[x]] <- predict(bc.test, anchor.test[[x]])
+}
+
+fluidPage(
+  fluidRow(hchart(density(test2),type="area",color="red", name="General Living Area"))
+)
+
+```
+
+## Inherent Rankings
+
+Features about quality of a product has an inherent ranking to it.  Poor, satisfactory, good have a rank order that we want to preserve in the model.  
+
+```{r}
+cols = c("FireplaceQu", "BsmtQual", "BsmtCond", "GarageQual", "GarageCond", 
+    "ExterQual", "ExterCond", "HeatingQC", "PoolQC", "KitchenQual", "BsmtFinType1", 
+    "BsmtFinType2", "Functional", "Fence", "BsmtExposure", "GarageFinish", 
+    "LandSlope", "LotShape", "PavedDrive", "Street", "Alley", "CentralAir", 
+    "MSSubClass", "OverallCond", "YrSold", "MoSold")
+
+FireplaceQu = c("None", "Po", "Fa", "TA", "Gd", "Ex")
+BsmtQual = c("None", "Po", "Fa", "TA", "Gd", "Ex")
+BsmtCond = c("None", "Po", "Fa", "TA", "Gd", "Ex")
+GarageQual = c("None", "Po", "Fa", "TA", "Gd", "Ex")
+GarageCond = c("None", "Po", "Fa", "TA", "Gd", "Ex")
+ExterQual = c("Po", "Fa", "TA", "Gd", "Ex")
+ExterCond = c("Po", "Fa", "TA", "Gd", "Ex")
+HeatingQC = c("Po", "Fa", "TA", "Gd", "Ex")
+PoolQC = c("None", "Fa", "TA", "Gd", "Ex")
+KitchenQual = c("Po", "Fa", "TA", "Gd", "Ex")
+BsmtFinType1 = c("None", "Unf", "LwQ", "Rec", "BLQ", "ALQ", "GLQ")
+BsmtFinType2 = c("None", "Unf", "LwQ", "Rec", "BLQ", "ALQ", "GLQ")
+Functional = c("Sal", "Sev", "Maj2", "Maj1", "Mod", "Min2", "Min1", "Typ")
+Fence = c("None", "MnWw", "GdWo", "MnPrv", "GdPrv")
+BsmtExposure = c("None", "No", "Mn", "Av", "Gd")
+GarageFinish = c("None", "Unf", "RFn", "Fin")
+LandSlope = c("Sev", "Mod", "Gtl")
+LotShape = c("IR3", "IR2", "IR1", "Reg")
+PavedDrive = c("N", "P", "Y")
+Street = c("Pave", "Grvl")
+Alley = c("None", "Pave", "Grvl")
+MSSubClass = c("20", "30", "40", "45", "50", "60", "70", "75", "80", "85", 
+    "90", "120", "150", "160", "180", "190")
+OverallCond = NA
+MoSold = NA
+YrSold = NA
+CentralAir = NA
+levels = list(FireplaceQu, BsmtQual, BsmtCond, GarageQual, GarageCond, 
+    ExterQual, ExterCond, HeatingQC, PoolQC, KitchenQual, BsmtFinType1, 
+    BsmtFinType2, Functional, Fence, BsmtExposure, GarageFinish, LandSlope, 
+    LotShape, PavedDrive, Street, Alley, CentralAir, MSSubClass, OverallCond, 
+    YrSold, MoSold)
+i = 1
+
+for (c in cols) {
+    if (c == "CentralAir" | c == "OverallCond" | c == "YrSold" | c == "MoSold") {
+        anchor.train[, c] = as.numeric(factor(anchor.train[, c]))
+        anchor.test[, c] = as.numeric(factor(anchor.test[, c]))
+    } else {
+      anchor.train[, c] = as.numeric(factor(anchor.train[, c], levels = levels[[i]]))
+      anchor.test[, c] = as.numeric(factor(anchor.test[, c], levels = levels[[i]]))
+    }
+
+    i = i + 1
+}
+
+```
+
 
 There are over 70 variables in the data set.  I want a more systematic approach to determine which variables I should be exploring deeper and including in the final model.
 
@@ -125,55 +657,16 @@ Boruta is supposed to be an improvement over Random Forest variable importance. 
 3.  At every iteration, it checks whether a real feature has a higher importance than the best of its shadow features (i.e. whether the feature has a higher Z score than the maximum Z score of its shadow features) and constantly removes features that are deemed highly unimportant
 4.  Algorithm stops either when all features gets confirmed or rejected or it reaches a specified limit of random forest runs
 
-
 **Applications in Insurance/Reinsurance?**
 
 * It could validate model features that are being used.  
 * Aid in developing models by subsetting explanatory variables so that a smaller subset is used instead of looking at insignificant variables.
 
-Data Prep for Boruta Analysis
-```{r Prep Data, eval=TRUE}
-field.ID <- "Id"
-field.Target <- "SalePrice"
-
-field.features <- setdiff(names(anchor.train),c(field.ID,field.Target))
-field.types <- sapply(field.features, function(x){class(data.train[[x]])})
-table(field.types)
-
-field.classes <- unique(field.types)
-field.attributes <- lapply(field.classes, function(x){names(field.types[field.types==x])})
-names(field.attributes) <- field.classes
-
-response <- data.train$SalePrice
-explanatory.train <- data.train[field.features]
-explanatory.test <- data.test[field.features]
-
-for (x in field.attributes$integer)
-{
-  explanatory.train[[x]][is.na(explanatory.train[[x]])] <- -1
-  explanatory.test[[x]][is.na(explanatory.test[[x]])] <- -1
-}
-
-for (x in field.attributes$character){
-  explanatory.train[[x]][is.na(explanatory.train[[x]])] <- "MISSING"
-  explanatory.test[[x]][is.na(explanatory.test[[x]])] <- "MISSING"
-}
-
-#rmvitems <- c("PoolQC","MiscFeature","Alley","Fence","FireplaceQu","LotFrontage")
-
-#Remove features where the majority of the data is missing
-explanatory.train <- explanatory.train %>% select(-Alley,-PoolQC,-Fence,-MiscFeature)
-explanatory.test <- explanatory.test %>% select(-Alley,-PoolQC,-Fence,-MiscFeature)
-
-#Remove those fields from the attribute list
-field.attributes$integer <- field.attributes$integer[! field.attributes$integer %in% rmvitems]
-field.attributes$character <- field.attributes$character[! field.attributes$character %in% rmvitems]
-field.features <- field.features[! field.features %in% rmvitems]
-```
+Boruta can't handle Nulls, so we will replace them with "Missing" or "-1" depending on the field type.
 
 ```{r Clean_Nulls, eval=TRUE}
 # I don't want to taint the original copy of the data
-boruta.train <- anchor.train %>% select(-Id)
+boruta.train <- anchor.train %>% dplyr::select(-Id)
 
 for (x in features.category[features.category != "Id"])
 {
@@ -222,6 +715,8 @@ f <- list(
 results_df <- results_df %>% arrange(desc(meanImp))
 
 results_df
+
+#write.csv(results_df, paste(dir.data, "Boruta.csv",sep=""))
 
 ```
 
@@ -289,56 +784,12 @@ lattice_list
 
 ```
 
-What we are looking for are variables where the distribution is skewed.  Depending on the distribution, we'll have to determine how to handle it.
-
-  1.  Remove the feature from the analysis    
-  2.  Bin categories together
-  3.  Impute missing data with mean/median values
-
-
-### Street
-
-```{r warning=FALSE}
-
-anchor.train %>% group_by(Street) %>% summarize(Count=n()
-                                                ,Pct=n()/nrow(anchor.train))
-
-```
-
-There are only two variables with no opportunity to do anything to improve the significance of the variable.
-
-### Second Variable
-```{r warning=F}
-print("world")
-```
-
-
-## Features Numeric {.tabset}
-
-```{r}
-sort(features.numeric)
-```
-
-### First Variable
-
-```{r}
-print("Yoda")
-```
-
 
 
 ```{r}
-head(explanatory.train)
+features.category
+features.numeric
 ```
-
-
-# Frequency Distribution
-
-
-
-
-
-
 
 # Boosting
 
@@ -501,21 +952,12 @@ for (j in 1:length(field.attributes$character))
 
 ```
 
-**tidyr One Hot Encoding**
 
-
-
-
-```{r}
-features.numeric
-```
-
-
-# Machine Stuff
+# One Hot Encoding
 
 Now that the variables are separated between Numerical and Categorical, we can One-Hot encode the categorical variables.
 
-```{r One_Hot, eval=TRUE}
+```{r One_Hot, eval=FALSE}
 # First one-hot encode the categorical variables
 anchor.train.encoded <- anchor.train[,features.category] %>%
   gather(variable, value, -(Id)) %>%
@@ -529,7 +971,7 @@ anchor.train.encoded <- left_join(anchor.train.encoded, anchor.train[features.nu
 
 #anchor.train.encoded <- subset(anchor.train.encoded, select=-c(Id))
 
-anchor.train.encoded <- cbind(anchor.train.encoded, response.train)
+anchor.train.encoded <- cbind(anchor.train.encoded, SalePrice=response.train)
 
 colnames(anchor.train.encoded) <- gsub("[^[:alnum:]]", "_",colnames(anchor.train.encoded))
 
@@ -546,6 +988,7 @@ anchor.test.encoded <- anchor.test[,features.category] %>%
 
 # If not 1, then it is definitely 0
 anchor.test.encoded[is.na(anchor.test.encoded)] <- 0
+
 anchor.test.encoded <- left_join(anchor.test.encoded, anchor.test[features.numeric], by="Id") %>% select(-Id)
 
 colnames(anchor.test.encoded) <- gsub("[^[:alnum:]]", "_",colnames(anchor.test.encoded))
@@ -554,28 +997,109 @@ for(i in 1:ncol(anchor.test.encoded)){
   anchor.test.encoded[is.na(anchor.test.encoded[,i]), i] <- mean(anchor.test.encoded[,i], na.rm = TRUE)
 }
 
+anchor.test.encoded$SalePrice <- 0
 
 ```
+
+```{r Caret_One_Hot, eval=TRUE}
+
+anchor.train <- anchor.train %>% dplyr::select(-Id)
+anchor.test <- anchor.test %>% dplyr::select(-Id)
+
+features.category <- names(features[features == "character"])
+features.numeric <- names(features[features != "character"])
+
+dummies <- dummyVars(~.,anchor.train[features.category])
+anchor.train.encoded <- predict(dummies,anchor.train[features.category])
+colnames(anchor.train.encoded) <- gsub("[^[:alnum:]]", "_",colnames(anchor.train.encoded))
+
+dummies <- dummyVars(~.,anchor.test[features.category])
+anchor.test.encoded <- predict(dummies,anchor.test[features.category])
+colnames(anchor.test.encoded) <- gsub("[^[:alnum:]]", "_",colnames(anchor.test.encoded))
+
+
+```
+
 
 > Predictions from the MLR (and other xgboost packages) cannot make predictions when the columns are not consistent.  i.e. Train and Test must have the same columns used between both datasets.  If not, the output basically defaults to the average for all rows.  Even though it will make accurate predictions on the training set if you feed it back into the model for predictions.
 
-```{r Consistent_Data, eval=TRUE}
-#Use Only Columns that are available in Test after 
-anchor.train.encoded.cleaned <- anchor.train.encoded[colnames(anchor.train.encoded) %in% colnames(anchor.test.encoded)]
+```{r}
 
+colnames(anchor.test.encoded)
 
-#Filter out anything not used by Train
-anchor.test.encoded.cleaned <- anchor.test.encoded[colnames(anchor.test.encoded) %in% colnames(anchor.train.encoded.cleaned)]
+anchor.test.encoded[colnames(anchor.train.encoded[!(colnames(anchor.train.encoded) %in% colnames(anchor.test.encoded))])] <- 0
 
-anchor.train.encoded.cleaned <- cbind(anchor.train.encoded.cleaned, response.train)
-colnames(anchor.train.encoded.cleaned)
+anchor.train.encoded[colnames(anchor.test.encoded[!(colnames(anchor.test.encoded) %in% colnames(anchor.train.encoded))])] <- 0
 ```
 
 
+```{r}
+plot_ly(type="histogram"
+        ,x=anchor.train$Condition2) %>%
+  add_trace(x=anchor.test$Condition2)
+
+plot_ly(type="histogram"
+        ,x=anchor.train$BsmtFullBath) %>%
+  add_trace(x=anchor.test$BsmtFullBath)
+
+
+data.test %>% group_by(BsmtFullBath) %>% summarize(n=n())
+
+anchor.test[features.numeric]
+anchor.test[features.category]
+
+head(left_join(anchor.test.encoded, anchor.test[features.numeric], by="Id"))
+
+```
+
+# Error/Loss/Cost Functions
+
+There are times when appropriate Cost/Loss functions are not available in the `xgb` & `mlr` package to evalute the errors/residuals for machine learning.  Fortunately, you can create your own custom error metric to evaluate the residuals.
+
+As discussed in the outlier analysis, the cost function/residuals are important because gradient boosting buildings upon residuals.  
+
+Absolute and Huber Error metrics are supposed to be more robust to outliers than RMSE.  Seeing how 
+
+**Absolute Error**
+
+```{r Cost_Functions, eval=TRUE, message=FALSE, warning=FALSE}
+abse <- function(pred, dtrain){
+  labels <- getinfo(dtrain,"label")
+  err <- sum(abs(as.numeric(labels) - as.numeric(pred)))
+  return(list(metric="abse",value=err))
+}
+```
+
+
+**Huber Loss Function**
+
+https://en.wikipedia.org/wiki/Huber_loss
+
+```{r Cost_Functions_Huber, eval=TRUE, message=FALSE, warning=FALSE}
+huber_loss <- function(x,y,alpha)
+{
+  if(abs(x-y) < alpha){
+    err <- .5*(x-y)**2
+  } else
+  {
+    err <- alpha*abs(x-y)-.5*alpha**2
+  }
+  return(err)
+}
+
+huber <- function(pred, dtrain, alpha){
+  alpha <- ifelse(missing(alpha),.5,alpha)
+  labels <- getinfo(dtrain,"label")
+  err <- sum(mapply(huber_loss, as.numeric(pred), as.numeric(labels), alpha))
+  return(list(metric="huber",value=err))
+}
+
+```
+
 ```{r XGBoost_Default, eval=FALSE}
 
-dtrain <- xgb.DMatrix(as.matrix(anchor.train.encoded.cleaned),label=response.train)
-dtest <- xgb.DMatrix(as.matrix(anchor.test.encoded.cleaned))
+dtrain <- xgb.DMatrix(as.matrix(anchor.train.encoded),label=SalePrice)
+dtest <- xgb.DMatrix(as.matrix(anchor.test.encoded))
 
 #xgboost parameters
 xgb_params = list(
@@ -619,46 +1143,38 @@ https://www.kaggle.com/aniruddhachakraborty/lasso-gbm-xgboost-top-20-0-12039-usi
 
 ```{r}
 
-#blah <- anchor.train.encoded[colnames(anchor.train.encoded) %in% colnames(anchor.test.encoded)]
-#blah2 <- anchor.test.encoded[colnames(anchor.test.encoded) %in% colnames(blah)]
-
-#blah <- subset(anchor.train.encoded,select=c(OverallQual,GrLivArea,TotalBsmtSF,response_train))
-
-
-mlrn.traintask <- makeRegrTask(data=anchor.train.encoded.cleaned,target="response.train")
-
-#mlrn.traintask <- makeRegrTask(data=anchor.train.encoded,target="response_train")
-
+mlrn.traintask <- makeRegrTask(data=anchor.train.encoded,target="SalePrice")
+#mlrn.traintask <- makeRegrTask(data=anchor.train.encoded.rmsle,target="SalePrice")
 #mlrn.traintask <- createDummyFeatures(mlrn.traintask)
 
 mlrn.lrn <- makeLearner("regr.xgboost")
 
 mlrn.lrn$par.vals = list(
   #nthread = 8   #Commented Out so that it uses the max
-  nrounds = 1000
+  nrounds = 2000
   #,alpha = 1
+  #,lambda=1
   ,print_every_n = 100
   ,objective = "reg:linear"
   ,early_stopping_rounds = 10  # Helps to optimize efficiency since we have high number of rounds
-  ,eval.metric = "rmse"
-  #,feval=huber
-  #,maximize=F
+  #,eval.metric = "rmse"
+  ,feval=huber
+  ,maximize=F #Needed with custom loss function
 )
 
 mlrn.params <- makeParamSet( 
   makeDiscreteParam("booster",values = c("gbtree"))
-  ,makeIntegerParam("gamma",lower=0,upper=25)
-  ,makeNumericParam("lambda",lower=1,upper=5)
-  ,makeIntegerParam("max_depth",lower = 3,upper = 10)
+  ,makeIntegerParam("gamma",lower=0,upper=5)
+  #,makeNumericParam("lambda",lower=1,upper=5)
+  ,makeIntegerParam("max_depth",lower = 3,upper = 25)
   ,makeNumericParam("eta",lower=0.05,upper=0.3)  # Should be tuned with n rounds
-  ,makeNumericParam("min_child_weight",lower = 1L,upper = 5L)
-  ,makeNumericParam("subsample",lower = 0.3,upper = 1)
-  ,makeNumericParam("colsample_bytree",lower = 0.3,upper = 1)
+  ,makeNumericParam("min_child_weight",lower = 1,upper = 5)
+  ,makeNumericParam("subsample",lower = 0.1,upper = .8)
+  ,makeNumericParam("colsample_bytree",lower = 0.2,upper = .9)
 )
 
-mlrn.rdesc <- makeResampleDesc("CV",iters=10)  # Performs n-fold cross validation
-mlrn.ctrl <- makeTuneControlRandom(maxit = 30)  # Optimization Algorithm
-
+mlrn.rdesc <- makeResampleDesc("CV",iters=5)  # Performs n-fold cross validation
+mlrn.ctrl <- makeTuneControlRandom(maxit = 2)  # Optimization Algorithm
 
 ```
 
@@ -669,26 +1185,50 @@ mytune <- tuneParams(learner = mlrn.lrn
                      ,resampling = mlrn.rdesc
                      ,par.set = mlrn.params
                      ,control = mlrn.ctrl
+                     ,measures=rmse
 )
 Sys.time()
 ```
 
 ```{r}
 #colnames(anchor.test.encoded)
+listMeasures(mlrn.traintask)
 
-anchor.test.encoded.cleaned$response.train <- 0
 #blah2 <- subset(anchor.test.encoded,select=c(GrLivArea,TotalBsmtSF,OverallQual,response_train))
 #mlrn.testtask <- makeRegrTask(data=anchor.test.encoded,target="response_train")
-mlrn.testtask <- makeRegrTask(data=anchor.test.encoded.cleaned,target="response.train")
+mlrn.testtask <- makeRegrTask(data=anchor.test.encoded,target="SalePrice")
 #mlrn.testtask <- createDummyFeatures(mlrn.testtask)
 ```
 
 
 ```{r}
+
+mytune$x
+mytune$y
 mlrn.tuned_param <- setHyperPars(learner=mlrn.lrn
                                  ,par.vals=mytune$x)
 
-model <- train(mlrn.tuned_param, mlrn.traintask)
+resample(mlrn.tuned_param, mlrn.traintask,mlrn.rdesc,measures=list(rmse,mse))
+
+hypdata <- generateHyperParsEffectData(mytune, partial.dep = TRUE)
+
+plotHyperParsEffect(hypdata, x = "max_depth", y = "rmse.test.rmse", plot.type = "line",
+  partial.dep.learn = "regr.randomForest")
+
+plotHyperParsEffect(hypdata, x = "iteration", y = "rmse.test.rmse", plot.type = "line",
+  partial.dep.learn = "regr.randomForest")
+
+plot_ly(type="scatter",mode="line+markers"
+        ,x=hypdata$data$iteration
+        ,y=hypdata$data$rmse.test.rmse)
+
+plot_ly(type="scatter",mode="line+markers"
+        ,x=hypdata$data$iteration
+        ,y=hypdata$data$rmsle.test.mean)
+
+model <- mlr::train(mlrn.tuned_param, mlrn.traintask)
+
+model$learner$par.vals
 
 prediction.tuned <- predict(model, mlrn.testtask)
 prediction <- predict(model, mlrn.traintask)
@@ -696,7 +1236,8 @@ prediction <- predict(model, mlrn.traintask)
 prediction.tuned
 prediction
 
-write.csv(prediction.tuned,  paste0(dir.data,"final_7.csv"))
+write.csv(prediction,  paste0(dir.data,"train.csv"))
+write.csv(prediction.tuned,  paste0(dir.data,"final_12.csv"))
 ```
 
 ```{r}
@@ -711,22 +1252,36 @@ write.csv(xgb_linear,paste0(dir.data,"important.csv"))
 ```
 
 
-```{r}
-model$learner$par.vals
-
-learner=mlrn.lrn
-
-```
-
 If the datasets are large and you don't want to spend the time having to retrain the model in the future.  You can save the model.
 ```{r, eval=FALSE}
-
 #To Save
 xgb.save(model.xgboost,"model.xgboost")
 
 #To Load a Saved Model
 model.xgboost2 <-  xgb.load("model.xgboost")
 ```
+
+# Lassor Regression with Caret
+
+```{r}
+
+ct.control <- trainControl(method="cv",number=20)
+lassoGrid <- expand.grid(alpha=1,lambda=seq(.001,1,by=.005))
+
+lasso.data <- anchor.train %>% select(-SalePrice)
+
+lasso_mod <- train(x=lasso.data, y=response.train, method="glmnet",trControl=ct.control, tuneGrid = lassoGrid)
+
+lasso_mod$bestTune
+
+min(lasso_mod$results$RMSE)
+
+varImp(lasso_mod, scale=F)
+
+
+
+```
+
 
 # Results
 
