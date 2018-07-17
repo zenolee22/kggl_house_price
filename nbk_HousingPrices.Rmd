@@ -1,24 +1,14 @@
 ---
 title: "Kaggle Housing Prices"
-output: html_notebook
+abstract: |
+  The following notebook is designed to simply explore and learn practical machine learning techniques utilizing data retrieved from Kaggle.  
+output: 
+  html_notebook:
+    toc: TRUE
+    toc_depth: 1
 ---
 
-#Introduction
-The following notebook is designed to simply explore and learn practical machine learning techniques utilizing data retrieved from Kaggle.  
-
-#Overview
-1.  Initialization
-2.  Import Data
-3.  Exploratory Analysis
-4.  Feature Engineering
-    * Boruta Analysis
-5.  Boosting
-    * Extreme Gradient Boosting
-6.  Results
-7.  Correlation Analysis
-8.  Appendix A.  Data Dictionary
-9.  Appendix B.  XGBoost Resources
-10.  Appendix C.  Preventing Overfitting
+#Links
 
 https://www.kaggle.com/aniruddhachakraborty/lasso-gbm-xgboost-top-20-0-12039-using-r
 
@@ -28,11 +18,18 @@ https://towardsdatascience.com/how-to-handle-missing-data-8646b18db0d4
 
 https://www.kaggle.com/serigne/stacked-regressions-top-4-on-leaderboard
 
+https://www.kaggle.com/erikbruin/house-prices-lasso-xgboost-and-a-detailed-eda
+
+https://www.kaggle.com/bwboerman/r-data-table-glmnet-xgboost-with-caret
+
+*Neural network example*     
+https://www.hackerearth.com/practice/machine-learning/machine-learning-projects/python-project/tutorial/
+
 # Initialization
 
 Set Libraries
 ```{r libraries, eval=TRUE, message=FALSE}
-# Some packages are not available for R 3.5
+# Use R 3.4, some packages are not available for R 3.5
 
 library(data.table)# Data tables 
 library(plotly)    # Plots and Graphs
@@ -70,8 +67,9 @@ data.train <- read.csv(paste(dir.data,"train.csv",sep=""), stringsAsFactors = FA
 #setwd("W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/")
 ```
 
+# EDA - Exploratory Data Analysis
 
-# Data Summary
+## Data Summary
 
 ```{r}
 summary(data.train)
@@ -82,6 +80,11 @@ data.train %>% skim() %>% kable()
 data.train %>% skim()
 
 ```
+
+```{r}
+data.train %>% dplyr::group_by(OverallQual) %>% summarize(SalePrice=mean(SalePrice)) %>% plot_ly(x=~OverallQual, y=~SalePrice, type="bar")
+```
+
 
 ```{r}
 
@@ -124,7 +127,9 @@ fluidPage(
 
 ```
 
-# Outliers
+## Outliers
+
+## General Living Area
 
 ```{r}
 plot_ly(type="scatter",mode="markers"
@@ -135,7 +140,7 @@ plot_ly(type="scatter",mode="markers"
 ```
 
 ```{r Rmv_Outliers, eval=TRUE}
-anchor.train <- data.train %>% filter(GrLivArea < 4600)
+anchor.train <- data.train %>% filter(GrLivArea < 4000)
 
 plot_ly(anchor.train
         ,mode="markers"
@@ -147,7 +152,7 @@ plot_ly(anchor.train
 
 ```
 
-# Skewness
+## Sale Price Skewness
 
 Sale Price is the target/response variable, so let's do a little analysis on it.
 
@@ -187,7 +192,7 @@ grid.arrange(p1, p2, ncol=2)
 
 Looking at the QQ Plot, we can confirm that the transform is definitely more normally distributed.
 
-# Feature Engineering
+# Data Processing
 
 ## Missing Values?
 
@@ -198,7 +203,17 @@ round(sapply(anchor.train,function(x) sum(is.na(x))) / nrow(anchor.train) * 100,
 ```
 
 
-```{r rmv_Nulls, eval=TRUE, message=FALSE, warning=FALSE}
+```{r}
+highchart() %>% 
+  hc_add_series_boxplot(x=anchor.train$SalePrice,
+                        by=anchor.train$MSZoning
+                        ,name="MS Zone") %>%
+  hc_add_theme(hc_theme_flatdark())
+
+```
+
+
+```{r Combine, eval=TRUE, message=FALSE, warning=FALSE}
 # We remove SalePrice because we don't want the One Hot Encoding to consider it as a feature
 response.train <- log(anchor.train$SalePrice)
 
@@ -207,7 +222,6 @@ anchor.train <- anchor.train %>% dplyr::select(-SalePrice)
 
 # Create a combined data set where we can do the transformations all at once
 anchor <- rbind(anchor.train, data.test)
-
 ```
 
 >**Why Combine Train & Test?**  <br>1.  We can be consistent on how we transform the data.  <br>2.  When using xgboost, the same number of columns must be available for the prediction or else you will get incorrect results.  If train has a feature level not available in test, then One-Hot Encoding will not produce the appropriate columns.
@@ -222,7 +236,6 @@ features.category <- names(features[features == "character"])
 features.numeric <- names(features[features != "character"])
 
 ```
-
 
 ## Imputation of Categorical Data {.tabset}
 
@@ -363,6 +376,27 @@ features.numeric <- names(features[features != "character"])
 
 anchor[features.numeric] %>% skim()
 ```
+### Garage Year Built
+
+```{r}
+anchor %>% group_by(GarageType) %>% tally()
+
+```
+
+```{r}
+anchor %>% group_by(YearBuilt, YearRemodAdd, GarageYrBlt) %>% 
+  filter(is.na(GarageYrBlt)==TRUE | GarageYrBlt >2010 ) %>% 
+  tally()
+```
+
+There is 1 instance where the Garage Year built is 2207, which is definitely an error.  For that one example, we will set it to the year of the remodel as it appears that is what it was supposed to be.
+
+```{r}
+anchor$GarageYrBlt[anchor$GarageYrBlt == 2207] <- 2007
+
+anchor %>% group_by(GarageYrBlt) %>% tally()
+
+```
 
 For any numeric variable, let's replace anything missing with 0.  
 
@@ -374,13 +408,27 @@ for (x in features.numeric){
 
 ```
 
+# Feature Engineering {.tabset}
 
-### BsmtFinSF1 & BsmtFinSF2
+## BsmtFinSF1 & BsmtFinSF2
 
 Based on the definition, it appears that if a basement has multiple finishes, it uses a 2nd variable to track the square footage of the next finish.  If you do not combine these variables, you don't have an apples to apples comparison to homes with a single basement finish
 
 ```{r}
 anchor %>% dplyr::select(BsmtFinSF1, BsmtFinSF2, TotalBsmtSF)
+```
+
+```{r}
+df <- data.train %>% group_by(Neighborhood) %>% summarize(Med_SalePrice=median(SalePrice)) %>% arrange(Med_SalePrice) 
+
+df$Neighborhood <- factor(df$Neighborhood,levels=df$Neighborhood)
+
+plot_ly(type="bar"
+        ,x=df$Neighborhood
+        ,y=df$Med_SalePrice
+        ,marker=list(color="#ffaa80"
+                     ,line=list(color="#ff7733",width=1.25))) %>%
+  layout(title="Neighborhoods by Median Sale Price")
 ```
 
 
@@ -874,6 +922,14 @@ anchor.train.encoded <- cbind(anchor.train.encoded,SalePrice=response.train)
 anchor.test.encoded$SalePrice <- 0
 ```
 
+```{r Divide_Train, eval=TRUE}
+
+intrain <- createDataPartition(y=anchor.train.encoded$SalePrice, p = .7, list=FALSE)
+
+part.train <- anchor.train.encoded[intrain,]
+part.validate <- anchor.train.encoded[-intrain,]
+```
+
 
 > Predictions from the MLR (and other xgboost packages) cannot make predictions when the columns are not consistent.  i.e. Train and Test must have the same columns used between both datasets.  If not, the output basically defaults to the average for all rows.  Even though it will make accurate predictions on the training set if you feed it back into the model for predictions.
 
@@ -922,8 +978,8 @@ huber <- function(pred, dtrain, alpha){
 ```
 
 ```{r XGBoost_Default, eval=FALSE}
-dtrain <- xgb.DMatrix(as.matrix(anchor.train.encoded %>% dplyr::select(-SalePrice)),label=response.train)
-dtest <- xgb.DMatrix(as.matrix(anchor.test.encoded))
+dtrain <- xgb.DMatrix(as.matrix(part.train %>% dplyr::select(-SalePrice)),label=as.matrix(part.train$SalePrice))
+dtest <- xgb.DMatrix(as.matrix(part.validate %>% dplyr::select(-SalePrice)),label=as.matrix(part.validate$SalePrice))
 
 #xgboost parameters
 xgb_params = list(
@@ -931,11 +987,11 @@ xgb_params = list(
   objective = 'reg:linear',
   colsample_bytree = 0.4603,
   subsample = 0.5213,
-  eta = 0.05, 
-  max_depth = 3,
-  alpha = .4640,
-  lambda = .8571,
-  gamma = .0468,
+  eta = 0.01, 
+  max_depth = 6,
+  #alpha = .4640,
+  #lambda = 0.0468,
+  gamma = 5,
   min_child_weight = 1.7817
   #base_score = 7.76
 )
@@ -946,13 +1002,13 @@ model.xgcv <- xgb.cv(params=xgb_params
                      ,nfold=5  #Cross Validation folds
                      ,showsd = T # Show SD of cross validation
                      ,stratified = T # sample folds should be stratified by the values of outcome labels
-                     ,print_every_n = 10
+                     ,print_every_n = 20
                      ,early_stopping_rounds = 20 # Stops if the performance doesn't improve per K rounds
                      ,maximize=F  
                      #,metrics="mae"
 )
 
-best_n_rounds = 598
+best_n_rounds = 824
 
 model.xgboost = xgb.train(xgb_params
                           ,data=dtrain
@@ -962,7 +1018,7 @@ model.xgboost = xgb.train(xgb_params
                           #,max.depth = 10
                           ,nrounds = as.integer(best_n_rounds)
                           #,verbose = 1
-                          #,watchlist=watchlist
+                          ,watchlist=list(train=dtrain,test=dtest)
                           #,eval.metric = "logloss"
                           )
 
@@ -972,7 +1028,9 @@ prediction <- predict(model.xgboost,dtrain)
 importance_matrix <- xgb.importance(feature_names=names(dtrain), model=model.xgboost)
 xgb.plot.importance(importance_matrix=importance_matrix)
 
-write.csv(prediction,  paste0(dir.data,"default.csv"))
+write.csv(prediction,  paste0(dir.data,"default_2.csv"))
+
+write.csv(part.train$SalePrice,paste0(dir.data,"temp.csv"))
 ```
 
 # Machine Learning with MLR
@@ -989,10 +1047,10 @@ mlrn.lrn <- makeLearner("regr.xgboost")
 
 mlrn.lrn$par.vals = list(
   #nthread = 8   #Commented Out so that it uses the max
-  nrounds = 2000
+  nrounds = 3000
   #,alpha = 1
   #,lambda=1
-  ,print_every_n = 100
+  ,print_every_n = 500
   ,objective = "reg:linear"
   ,early_stopping_rounds = 10  # Helps to optimize efficiency since we have high number of rounds
   ,eval.metric = "rmse"
@@ -1006,13 +1064,13 @@ mlrn.params <- makeParamSet(
   #,makeNumericParam("lambda",lower=1,upper=5)
   ,makeIntegerParam("max_depth",lower = 3,upper = 25)
   ,makeNumericParam("eta",lower=0.005,upper=0.3)  # Should be tuned with n rounds
-  ,makeNumericParam("min_child_weight",lower = 3,upper = 20)
+  ,makeNumericParam("min_child_weight",lower = 1,upper = 20)
   ,makeNumericParam("subsample",lower = 0.3,upper = 1)
   ,makeNumericParam("colsample_bytree",lower = 0.2,upper = 1)
 )
 
 mlrn.rdesc <- makeResampleDesc("CV",iters=5)  # Performs n-fold cross validation
-mlrn.ctrl <- makeTuneControlRandom(maxit = 100)  # Optimization Algorithm
+mlrn.ctrl <- makeTuneControlRandom(maxit = 200)  # Optimization Algorithm
 
 ```
 
@@ -1074,7 +1132,7 @@ prediction <- predict(model, mlrn.traintask)
 prediction.tuned
 prediction
 
-write.csv(prediction,  paste0(dir.data,"train_results_5.csv"))
+write.csv(prediction,  paste0(dir.data,"train_results_8.csv"))
 write.csv(prediction.tuned,  paste0(dir.data,"final_13.csv"))
 ```
 
@@ -1099,24 +1157,28 @@ xgb.save(model.xgboost,"model.xgboost")
 model.xgboost2 <-  xgb.load("model.xgboost")
 ```
 
-# Lassor Regression with Caret
+# Lasso Regression with Caret
 
 ```{r}
 
-ct.control <- trainControl(method="cv",number=20)
-lassoGrid <- expand.grid(alpha=1,lambda=seq(.001,1,by=.005))
+ct.control <- trainControl(method="cv",number=10)
+lassoGrid <- expand.grid(alpha=1,lambda=seq(.001,.1,by=.0005))
 
-lasso.data <- anchor.train %>% select(-SalePrice)
+lasso.data <- anchor.train %>% dplyr::select(-SalePrice)
 
-lasso_mod <- train(x=lasso.data, y=response.train, method="glmnet",trControl=ct.control, tuneGrid = lassoGrid)
+lasso_mod <- train(x=anchor.train.encoded, y=response.train, method="glmnet",trControl=ct.control, tuneGrid = lassoGrid)
 
 lasso_mod$bestTune
-
+ 
 min(lasso_mod$results$RMSE)
 
 varImp(lasso_mod, scale=F)
 
+predictions.lasso <- predict(lasso_mod, anchor.train.encoded)
 
+head(predictions.lasso)
+
+write.csv(predictions.lasso, paste0(dir.data,"lasso_1.csv"))
 
 ```
 
