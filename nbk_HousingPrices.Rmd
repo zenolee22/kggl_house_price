@@ -1,11 +1,12 @@
 ---
 title: "Kaggle Housing Prices"
+author: "Zeno Lee"
 abstract: |
   The following notebook is designed to simply explore and learn practical machine learning techniques utilizing data retrieved from Kaggle.  
 output: 
   html_notebook:
-    toc: TRUE
-    toc_depth: 1
+    toc: true
+    toc_depth: 2
 ---
 
 #Links
@@ -28,7 +29,7 @@ https://www.hackerearth.com/practice/machine-learning/machine-learning-projects/
 # Initialization
 
 Set Libraries
-```{r libraries, eval=TRUE, message=FALSE}
+```{r libraries, eval=TRUE, message=FALSE, warning=FALSE}
 # Use R 3.4, some packages are not available for R 3.5
 
 library(data.table)# Data tables 
@@ -48,7 +49,8 @@ library(VIM)       # Visualizations
 library(caret)
 library(glmnet)
 library(highcharter)
-library(gridExtra)
+library(gridExtra) 
+library(corrplot)
 
 # For Skewness
 library(MASS)      # Box Cox Transformation
@@ -59,32 +61,75 @@ library(moments)
 ```
 
 
-# Import Data
-```{r Data, eval=TRUE}
-dir.data <- "C:/Zeno/R/House Prices/Data/"
-data.test <- read.csv(paste(dir.data,"test.csv",sep=""),stringsAsFactors = FALSE)
-data.train <- read.csv(paste(dir.data,"train.csv",sep=""), stringsAsFactors = FALSE)
-#setwd("W:/Bermuda/Actuarial/SQL Scripts/Kaggle/House Prices/")
+```{r}
+install.packages("data.table")# Data tables 
+install.packages("plotly")    # Plots and Graphs
+install.packages("Boruta")    # Runs a Boruta Feature Analysis
+install.packages("dplyr")     # Data Manipulation
+install.packages("corrplot")  # Correlation Plots
+install.packages("xgboost")   # Runs Extreme Gradient Boosting
+install.packages("Matrix")    # For sparse matrices
+install.packages("shiny")     # For Layouts
+install.packages("mlr")       # Machine Learning
+install.packages("tidyr")     # Data Manipulation
+install.packages("skimr")     # Summary Statistics
+install.packages("DMwR")      # KNN Data Imputation
+install.packages("mice")      # Multiple Imputation
+install.packages("VIM")       # Visualizations
+install.packages("caret")
+install.packages("glmnet")
+install.packages("highcharter")
+install.packages("gridExtra") 
+install.packages("corrplot")
+
+# For Skewness
+install.packages("MASS")      # Box Cox Transformation
+install.packages("moments")
+
 ```
+
+
+# Import Data
+```{r Data, eval=TRUE, warning=FALSE, message=FALSE}
+dir.data <- "E:/Zeno/R/kggl_house_price/Data/"
+data.test <- fread(paste(dir.data,"test.csv",sep=""),stringsAsFactors = FALSE)
+data.train <- fread(paste(dir.data,"train.csv",sep=""), stringsAsFactors = FALSE)
+```
+
+# Linear Regression Background
+
+Linear Regression has 5 key assumptions    
+    1.  Linear Relationship    
+    2.  Multivariate Normality    
+    3.  Non-collinearity    
+    4.  No Auto-Correlation    
+    5.  Homoscedasticity    
 
 # EDA - Exploratory Data Analysis
 
 ## Data Summary
 
+The base method of quickly profile the data.
+
 ```{r}
 summary(data.train)
 ```
 
+I want to use skimr package to do a quick profile on the dataset.
+
 ```{r}
-data.train %>% skim() %>% kable()
+#data.train %>% skimr::skim() %>% kable()
 data.train %>% skim()
 
 ```
+
+Just a quick sanity check on the response variable
 
 ```{r}
 data.train %>% dplyr::group_by(OverallQual) %>% summarize(SalePrice=mean(SalePrice)) %>% plot_ly(x=~OverallQual, y=~SalePrice, type="bar")
 ```
 
+This isn't necessarily a place for this particular histogram.  I simply put it here for my own reference on building drill down charts through highcharter.
 
 ```{r}
 
@@ -127,7 +172,10 @@ fluidPage(
 
 ```
 
-## Outliers
+
+## Outlier Analysis
+
+For this outlier analysis, we know that intuitively that General Living Area (Square Footage) is a significant variable when predicting housing prices.  i.e. When all else is equal, the bigger the home the more it's going to cost.  So, I want to see how the data looks relative to the General Living Area.
 
 ## General Living Area
 
@@ -145,16 +193,27 @@ anchor.train <- data.train %>% filter(GrLivArea < 4000)
 plot_ly(anchor.train
         ,mode="markers"
         ,type="scatter"
-        ,marker=list(color="green")
+        ,marker=list(color="purple")
         ,x=~GrLivArea
         ,y=~SalePrice) %>%
   layout(title="Gen. Living Area vs Sale Price without Outliers")
 
 ```
 
+Box Whisker Plots
+
+```{r}
+highchart() %>% 
+  hc_add_series_boxplot(x=anchor.train$SalePrice,
+                        by=anchor.train$MSZoning
+                        ,name="MS Zone") %>%
+  hc_add_theme(hc_theme_flatdark())
+
+```
+
 ## Sale Price Skewness
 
-Sale Price is the target/response variable, so let's do a little analysis on it.
+Sale Price is the target/response variable, so let's do a little analysis on it.  Let's get a density plot of the response variable (basically frequency for continuous variables).
 
 ```{r Density_Plot, eval=TRUE}
 h1 <- hchart(density(anchor.train$SalePrice)
@@ -192,6 +251,7 @@ grid.arrange(p1, p2, ncol=2)
 
 Looking at the QQ Plot, we can confirm that the transform is definitely more normally distributed.
 
+
 # Data Processing
 
 ## Missing Values?
@@ -200,16 +260,6 @@ Looking at the QQ Plot, we can confirm that the transform is definitely more nor
 ```{r}
 #sapply(data.train,function(x) sum(x=="NULL"))  # Use when Null
 round(sapply(anchor.train,function(x) sum(is.na(x))) / nrow(anchor.train) * 100,digits=3)   # Use when NA
-```
-
-
-```{r}
-highchart() %>% 
-  hc_add_series_boxplot(x=anchor.train$SalePrice,
-                        by=anchor.train$MSZoning
-                        ,name="MS Zone") %>%
-  hc_add_theme(hc_theme_flatdark())
-
 ```
 
 
@@ -228,6 +278,7 @@ anchor <- rbind(anchor.train, data.test)
 
 Now we need to separate out the Numeric vs Categorical variables.  We do need to understand the variables as MBSubClass looks like a numerical variable, but closer inspection shows that the integer values simply represent a housing type.  We do not want the Machine Learning model to assume there is an inherent ranking with those values.  We'll need to include them in the One-Hot Encoding.
 
+
 ```{r Feature_Types, eval=TRUE}
 anchor <- anchor %>% mutate(MSSubClass=as.character(MSSubClass))
 
@@ -237,13 +288,20 @@ features.numeric <- names(features[features != "character"])
 
 ```
 
-## Imputation of Categorical Data {.tabset}
+## Imputation of Data
+
+Imputing data is simply the process of replacing missing data.  There are various ways to do it for both Categorical and Numeric/Continuous variables.  Some examples for categorical variables is to bin/group them with another factor within the independent variable.  If the distribution is high enough, it is sometimes appropriate to give missing it's own category.  For continuous variables, sometimes the easiest is to replace the missing data with the mean/median/mode of the variable.  Some more advanced techniques would be to use KNN (k-Nearest Neighbor) Imputation.  Note that a more advanced technique doesn't mean it will yield better results.
+
+### Categorical Data {.tabset}
+
+We want to focus on the features/independent variables that have anything in the missing column.
 
 ```{r}
 anchor[features.category] %>% skim() 
 ```
 
-### Utilities
+
+#### Utilities
 
 We can see that other than 3 records, everything is All Public Utilities. Basically this field is useless for modeling as it has absolutely no variance.  
 
@@ -255,7 +313,7 @@ anchor %>% group_by(Utilities) %>% tally()
 anchor <- anchor %>% dplyr::select(-Utilities)
 ```
 
-### SaleType
+#### SaleType
 
 There is only 1 missing record and will have no impact on the analysis.  We will bucket it with the "standard" saletype, which will be the WD category.
 
@@ -268,7 +326,7 @@ anchor$SaleType[is.na(anchor$SaleType)] <- "WD"
 ```
 
 
-### KitchenQual
+#### KitchenQual
 
 There is only a single missing value for kitchen quality.  Let's put that in the "typical/average" category.
 
@@ -281,7 +339,7 @@ anchor$KitchenQual[is.na(anchor$KitchenQual)] <- "TA"
 ```
 
 
-### MSZoning
+#### MSZoning
 
 Ideally we could cluster the missing feature based on the other features to better classify what type of home this is.  But since we are talking about only 4 missing values, we will bucket it with the "RL" or "Residential Low Density" group.
 
@@ -294,7 +352,7 @@ anchor %>% group_by(MSZoning, MSSubClass) %>% tally()
 anchor$MSZoning[is.na(anchor$MSZoning)] <- "RL"
 ```
 
-### Functional
+#### Functional
 
 ```{r}
 anchor %>% group_by(Functional) %>% tally()
@@ -305,7 +363,7 @@ anchor$Functional[is.na(anchor$Functional)] <- "Typ"
 ```
 
 
-### Electrical
+#### Electrical
 
 ```{r}
 
@@ -317,7 +375,7 @@ anchor %>% group_by(Electrical) %>% tally()
 anchor$Electrical[is.na(anchor$Electrical)] <- "SBrkr"
 ```
 
-### Exterior1st & Exterior2nd
+#### Exterior1st & Exterior2nd
 
 ```{r}
 anchor %>% group_by(Exterior1st, Exterior2nd) %>% tally() %>% arrange(desc(n))
@@ -331,7 +389,7 @@ anchor$Exterior2nd[is.na(anchor$Exterior2nd)] = "VinylSd"
 ```
 
 
-### None Type
+#### None Type
 
 The are a group of variables, where when the values are missing, it is actually "None".  We will replace only those variables with when missing.
 
@@ -343,7 +401,7 @@ for (x in c("Alley", "PoolQC", "MiscFeature", "Fence", "FireplaceQu", "GarageTyp
 }
 ```
 
-## Check Categorial Variables
+### Check Categorial Variables
 
 ```{r}
 features <- sapply(anchor,typeof)
@@ -357,14 +415,13 @@ We see that we no longer have any missing values for any of the categorial varia
 
 ## YrSold &  MoSold
 
-We want to move the inherent ranking of the Year and Month sold by changing them from integer to character values.
+We want to remove the inherent ranking of the Year and Month sold by changing them from integer to character values.  This may not necessarily the right approach.  Year/Month is essentially a sequential order  However, I'm assuming that people do not consider the time of year in which they buy a home.
 
 ```{r}
 anchor$YrSold <- as.character(anchor$YrSold)
 anchor$MoSold <- as.character(anchor$MoSold)
 
 anchor %>% group_by(YrSold, MoSold) %>% summarize(Count=n()) 
-
 ```
 
 ## Imputation of Numerical Data
@@ -376,6 +433,7 @@ features.numeric <- names(features[features != "character"])
 
 anchor[features.numeric] %>% skim()
 ```
+
 ### Garage Year Built
 
 ```{r}
@@ -398,7 +456,7 @@ anchor %>% group_by(GarageYrBlt) %>% tally()
 
 ```
 
-For any numeric variable, let's replace anything missing with 0.  
+For any numeric variable, let's replace anything missing with 0.  For the majority of the variables, if not all of them, the documentation stated that when missing, it usually means 0.  
 
 ```{r}
 
@@ -408,27 +466,131 @@ for (x in features.numeric){
 
 ```
 
+# Correlation Analysis
+
+Though dependent on the model/ML Method one uses, highly correlated variables could completely invalidate a model.  Understanding correlations between variables as part of the exploratory data analysis phase as it will dictate whether features need to be censored from training of models.
+
+Ordinal:  Categorical variable with a rank order
+Nominal:  Categorical variable with no ranking
+Continuous: Numeric variable
+
+Correlation calculations are differentiated between categorical and numerical variables.  There are appropriate tests based on the type of data it is:  
+    *  Ordinal vs Ordinal:  Pearson?
+    *  Nominal vs Nominal:  Chi-Square?
+    *  Ordinal vs Nominal:  
+    *  Continuous vs Nominal: ANOVA, Pearson Product Moment
+    *  Continuous vs Ordinal:  
+
+I'm still trying to understand the pros/cons of correlation tests.
+
+>*Note: The response/target variable is not in the data set*
+
+```{r}
+corrplot(cor(anchor[1:1456,features.numeric]),title = "Correlation Plot", method = "square")
+
+```
+
+The above plot is good, but it's static and it's difficult to see.  I've decided to reproduce the correlation plot in something more interactive.
+
+A correlation plot is basically a heatmap or treemap with even squares with shaded colors.  I found a function on google where someone created a "heatmap" to create a correlation plot.
+
+```{r}
+
+hchart.cor <- function(object, ...) {
+  
+  df <- as.data.frame(object)
+  is.num <- sapply(df, is.numeric)
+  df[is.num] <- lapply(df[is.num], round, 2)
+  dist <- NULL
+  
+  x <- y <- names(df)
+  
+  df <- tbl_df(cbind(x = y, df)) %>% 
+    gather(y, dist, -x) %>% 
+    mutate(x = as.character(x),
+           y = as.character(y)) %>% 
+    left_join(data_frame(x = y,
+                         xid = seq(length(y)) - 1), by = "x") %>% 
+    left_join(data_frame(y = y,
+                         yid = seq(length(y)) - 1), by = "y")
+  
+  ds <- df %>% 
+    select_("xid", "yid", "dist") %>% 
+    list.parse2()
+  
+  fntltp <- JS("function(){
+                  return this.series.xAxis.categories[this.point.x] + ' ~ ' +
+                         this.series.yAxis.categories[this.point.y] + ': <b>' +
+                         Highcharts.numberFormat(this.point.value, 2)+'</b>';
+               ; }")
+  cor_colr <- list( list(0, '#FF5733'),
+                    list(0.5, '#F8F5F5'),
+                    list(1, '#2E86C1')
+  )
+  highchart() %>% 
+    hc_chart(type = "heatmap") %>% 
+    hc_xAxis(categories = y, title = NULL) %>% 
+    hc_yAxis(categories = y, title = NULL) %>% 
+    hc_add_series(data = ds) %>% 
+    hc_plotOptions(
+           series = list(
+             boderWidth = 0,
+             dataLabels = list(enabled = TRUE)
+    )) %>% 
+    hc_tooltip(formatter = fntltp) %>% 
+    hc_legend(align = "right", layout = "vertical",
+              margin = 0, verticalAlign = "top",
+              y = 25, symbolHeight = 280) %>% 
+    hc_colorAxis(  stops= cor_colr,min=-1,max=1)
+}
+
+hchart.cor(cor(anchor[1:1456,features.numeric]))
+
+```
+
+Obviously, there are too many variables that this plot is difficult to read.  Since we aren't concerned with variables that aren't correlated, we'd want to filter on the variables that ARE correlated so we can further analyze the relationship.
+
 # Feature Engineering {.tabset}
 
 ## BsmtFinSF1 & BsmtFinSF2
 
-Based on the definition, it appears that if a basement has multiple finishes, it uses a 2nd variable to track the square footage of the next finish.  If you do not combine these variables, you don't have an apples to apples comparison to homes with a single basement finish
+Based on the definition, it appears that if a basement has multiple finishes, it uses a 2nd variable to track the square footage of the next finish.  There may be some opportunity here for some feature engineering.  Combining SF1 and SF2.  Maybe keeping it separated.  TBD.
 
 ```{r}
 anchor %>% dplyr::select(BsmtFinSF1, BsmtFinSF2, TotalBsmtSF)
 ```
 
+## Neighborhood
+
+Binning some of these neighborhoods together 
+
 ```{r}
-df <- data.train %>% group_by(Neighborhood) %>% summarize(Med_SalePrice=median(SalePrice)) %>% arrange(Med_SalePrice) 
+df <- data.train %>% 
+  group_by(Neighborhood) %>% 
+  summarize(Med_SalePrice=median(SalePrice)
+            ,N_Count=n()) %>% 
+  arrange(Med_SalePrice) 
 
 df$Neighborhood <- factor(df$Neighborhood,levels=df$Neighborhood)
 
-plot_ly(type="bar"
+plot_ly() %>% add_trace(type="bar"
         ,x=df$Neighborhood
         ,y=df$Med_SalePrice
+        ,name="Median Price"
         ,marker=list(color="#ffaa80"
                      ,line=list(color="#ff7733",width=1.25))) %>%
-  layout(title="Neighborhoods by Median Sale Price")
+  add_trace(type="scatter"
+            ,mode="lines"
+            ,x=df$Neighborhood
+            ,y=df$N_Count
+            ,name="Counts"
+            ,marker=list(color="#3333ff")
+            ,line=list(color="#6666ff")
+            ,yaxis="y2") %>%
+  layout(title="Neighborhoods by Median Sale Price and Counts"
+         ,yaxis=list(side="left",title="Median Sale",zeroline=FALSE,showgrid=FALSE)
+         ,yaxis2=list(side="right",title="Count",overlaying="y",showgrid=FALSE, zeroline=FALSE) )
+
 ```
 
 
@@ -456,8 +618,8 @@ h.grliv <- hchart(density(anchor$GrLivArea)
                   ,type="area"
                   ,color="#ff9999"
                   ,name="General Living Area")
-```
 
+```
 
 
 ```{r}
@@ -478,6 +640,15 @@ fluidPage(
            ,column(6,h.bx.grliv))
 )
 
+```
+
+```{r}
+p2 <- ggplot(anchor, aes(sample=GrLivArea)) + 
+  stat_qq(colour="red") + 
+  stat_qq_line(colour="blue",size=1.5) + 
+  ggtitle("Normal Q-Q Plot: Box Cox of General Living Area")
+
+p2
 ```
 
 ## Inherent Rankings
@@ -537,7 +708,6 @@ for (c in cols) {
 
 ```
 
-
 There are over 70 variables in the data set.  I want a more systematic approach to determine which variables I should be exploring deeper and including in the final model.
 
 ## Boruta Algorithm
@@ -586,7 +756,7 @@ for (x in features.numeric[features.numeric != "Id"])
 ```{r Running_Boruta, eval=TRUE}
 set.seed(123)
 
-bor.results <- Boruta(boruta.train,response.train,maxRuns = 101,doTrace = 0)
+bor.results <- Boruta(boruta.train[1:1456,],response.train,maxRuns = 50,doTrace = 0)
 ```
 
 Reviewing the Boruta Analysis Results
@@ -624,8 +794,9 @@ results_df
 
 Some of the "important" variables intuitively makes sense, i.e. General Living Area, Overall Quality, etc.  We will review the variables that seem to be of questionable decision.
 
+
 ```{r Plot_Features, eval=FALSE}
-nfeat = 45
+nfeat = 25
 
 p <- results_df %>% 
   plot_ly(y=~head(feature,n=nfeat)
@@ -649,11 +820,9 @@ fluidPage(
 ```
 
 
-## Features Categorical {.tabset}
+## Testing Automated Histograms
 
-```{r}
-sort(features.category)
-```
+This was testing to see if I could create better histograms of the data.  
 
 ```{r Hist_Categorical, eval=TRUE}
 
@@ -685,14 +854,6 @@ for (i in seq(from=1,to=length(features.category),by=seq_count))
 lattice_list
 
 ```
-
-
-
-```{r}
-features.category
-features.numeric
-```
-
 # Boosting
 
 ## Extreme Gradient Boosting (XGBoost)
@@ -702,8 +863,6 @@ XGBoost is a supervised machine learning technique, where the output is provided
 In Machine Learning, we talk of the relationship between simplicity and predictability of the model.  The tradeoff is referred to the **bias-variance** tradeoff.
 
 XGBoost is a tree ensemble, which is a set of classification and regression trees (CART).  CART differs from decision trees in that decision trees only provide the decision values, whereas CART provides an associated score with each leaf.
-
-![*CART Example*](C:/Zeno/R/House Prices/twocart.png)
 
 Random forests are also ensemble trees.  The only difference between Random Forests and XG Boost is how the model is trained.  To train the model, XG Boost uses an additive algorithm.  Fix what has been learned and add 1 new tree at a time.
 
@@ -727,7 +886,6 @@ For Classification problems, trees are grown to reduce misclassification rates i
 For Regression problems, it builds a generalized linear model and optimizes it using regularization (L1, L2) and gradient descent.  Subsequent models are built on residuals (Actual - Predicted).  *Gradient Descent* is a method where a vector of weights (or coefficients), we want to minimize the partial derivatives to find the local minima of the RSS.  Simply put, we want to minimize the error by tuning the values of the coefficients.
 
 For regularization, for linear regression we want to minimize the RSS (objective function) and we apply a penalty term to the objective function.  
-![*CART Example*](C:/Zeno/R/House Prices/Regularization.png)
 
 Optimizing lambda defines the trade-off between the prediction accuracy of the training sample and prediction accuracy of the hold out sample.
 
@@ -812,54 +970,11 @@ But one-hot encoding also presents two problems that are more particular to tree
 
 *Note: You will want to either remove the ID field or NULL it out.*
 
-```{r}
-
-#Build Sparse Matrix
-data.train.sparse <- explanatory.train[field.attributes$integer]
-data.test.sparse <- explanatory.test[field.attributes$integer]
-
-#head(sparse.model.matrix(explanatory.train))
-
-# One Hot Encode Train
-for (j in 1:length(field.attributes$character))
-{
-  print(field.attributes$character[j])
-  
-  toEncode <- unique(explanatory.train[,field.attributes$character[j]])
-  for (i in 1:(length(toEncode)-1))
-  {
-    data.train.sparse[,paste(field.attributes$character[j],toEncode[i],sep="_")] <- ifelse(explanatory.train[,field.attributes$character[j]] == toEncode[i],1,0)
-  }
-}
-
-# One Hot Encode Test
-for (j in 1:length(field.attributes$character))
-{
-  toEncode <- unique(explanatory.test[,field.attributes$character[j]])
-  for (i in 1:(length(toEncode)-1))
-  {
-    data.test.sparse[,paste(field.attributes$character[j],toEncode[i],sep="_")] <- ifelse(explanatory.test[,field.attributes$character[j]] == toEncode[i],1,0)
-  }
-}
-
-
-#toEncode <- unique(data.train[,field.attributes$character[2]])
-
-#for (i in 1:length(toEncode))
-#{
-#  data.sparse[,paste(field.attributes$character[2],toEncode[i],sep="_")] <- ifelse(data.train[,field.attributes$character[2]] == toEncode[i],1,0)
-#}
-
-#head(data.sparse)
-
-```
-
-
 # One Hot Encoding
 
 Now that the variables are separated between Numerical and Categorical, we can One-Hot encode the categorical variables.
 
-```{r One_Hot, eval=FALSE}
+```{r One_Hot_Manually, eval=FALSE}
 # First one-hot encode the categorical variables
 anchor.train.encoded <- anchor.train[,features.category] %>%
   gather(variable, value, -(Id)) %>%
@@ -915,8 +1030,8 @@ colnames(anchor.encoded) <- gsub("[^[:alnum:]]", "_",colnames(anchor.encoded))
 
 anchor.encoded <- cbind(anchor.encoded,anchor[features.numeric])
 
-anchor.train.encoded <- anchor.encoded[1:1458,]
-anchor.test.encoded <- anchor.encoded[1459:2917,]
+anchor.train.encoded <- anchor.encoded[1:1456,]
+anchor.test.encoded <- anchor.encoded[1457:2915,]
 
 anchor.train.encoded <- cbind(anchor.train.encoded,SalePrice=response.train)
 anchor.test.encoded$SalePrice <- 0
@@ -1024,13 +1139,12 @@ model.xgboost = xgb.train(xgb_params
 
 # Save the predictions on Test data
 prediction <- predict(model.xgboost,dtest)
-prediction <- predict(model.xgboost,dtrain)
+#prediction <- predict(model.xgboost,dtrain)
 importance_matrix <- xgb.importance(feature_names=names(dtrain), model=model.xgboost)
 xgb.plot.importance(importance_matrix=importance_matrix)
 
-write.csv(prediction,  paste0(dir.data,"default_2.csv"))
-
-write.csv(part.train$SalePrice,paste0(dir.data,"temp.csv"))
+#write.csv(prediction,  paste0(dir.data,"default_2.csv"))
+#write.csv(part.train$SalePrice,paste0(dir.data,"temp.csv"))
 ```
 
 # Machine Learning with MLR
@@ -1047,10 +1161,10 @@ mlrn.lrn <- makeLearner("regr.xgboost")
 
 mlrn.lrn$par.vals = list(
   #nthread = 8   #Commented Out so that it uses the max
-  nrounds = 3000
+  nrounds = 100
   #,alpha = 1
   #,lambda=1
-  ,print_every_n = 500
+  ,print_every_n = 10
   ,objective = "reg:linear"
   ,early_stopping_rounds = 10  # Helps to optimize efficiency since we have high number of rounds
   ,eval.metric = "rmse"
@@ -1070,7 +1184,7 @@ mlrn.params <- makeParamSet(
 )
 
 mlrn.rdesc <- makeResampleDesc("CV",iters=5)  # Performs n-fold cross validation
-mlrn.ctrl <- makeTuneControlRandom(maxit = 200)  # Optimization Algorithm
+mlrn.ctrl <- makeTuneControlRandom(maxit = 5)  # Optimization Algorithm
 
 ```
 
@@ -1098,36 +1212,43 @@ mlrn.testtask <- makeRegrTask(data=anchor.test.encoded,target="SalePrice")
 
 
 ```{r}
-
+# Just shows you the parameters selected
 mytune$x
 mytune$y
+
+# Retrieves the tuned parameters
 mlrn.tuned_param <- setHyperPars(learner=mlrn.lrn
                                  ,par.vals=mytune$x)
 
-resample(mlrn.tuned_param, mlrn.traintask,mlrn.rdesc,measures=list(rmse,mse))
+#resample(mlrn.tuned_param, mlrn.traintask,mlrn.rdesc,measures=list(rmse,mse))
 
+# I want to see the hyper tuning effects
 hypdata <- generateHyperParsEffectData(mytune, partial.dep = TRUE)
 
-plotHyperParsEffect(hypdata, x = "max_depth", y = "rmse.test.rmse", plot.type = "line",
+plotHyperParsEffect(hypdata, x = "iteration", y = "rmse.test.rmse", plot.type = "line",
   partial.dep.learn = "regr.randomForest")
 
-plotHyperParsEffect(hypdata, x = "iteration", y = "rmsle.test.mean", plot.type = "line",
-  partial.dep.learn = "regr.randomForest")
+#plotHyperParsEffect(hypdata, x = "iteration", y = "rmsle.test.mean", plot.type = "line",
+#  partial.dep.learn = "regr.randomForest")
 
-plot_ly(type="scatter",mode="line+markers"
+plot_ly(type="scatter",mode="lines+markers"
         ,x=hypdata$data$iteration
         ,y=hypdata$data$rmse.test.rmse)
 
-plot_ly(type="scatter",mode="line+markers"
-        ,x=hypdata$data$iteration
-        ,y=hypdata$data$rmsle.test.mean)
+#plot_ly(type="scatter",mode="lines+markers"
+#        ,x=hypdata$data$iteration
+#        ,y=hypdata$data$rmsle.test.mean)
 
+
+```
+
+```{r}
 model <- mlr::train(mlrn.tuned_param, mlrn.traintask)
 
 model$learner$par.vals
 
 prediction.tuned <- predict(model, mlrn.testtask)
-prediction <- predict(model, mlrn.traintask)
+#prediction <- predict(model, mlrn.traintask)
 
 prediction.tuned
 prediction
@@ -1135,6 +1256,7 @@ prediction
 write.csv(prediction,  paste0(dir.data,"train_results_8.csv"))
 write.csv(prediction.tuned,  paste0(dir.data,"final_13.csv"))
 ```
+
 
 ```{r}
 importance_matrix_tuned <- getFeatureImportance(model)
@@ -1144,7 +1266,7 @@ xgb_linear <- xgb_linear %>% arrange(desc(Importance))
 
 xgb_linear
 
-write.csv(xgb_linear,paste0(dir.data,"important.csv"))
+#write.csv(xgb_linear,paste0(dir.data,"important.csv"))
 ```
 
 
@@ -1178,19 +1300,15 @@ predictions.lasso <- predict(lasso_mod, anchor.train.encoded)
 
 head(predictions.lasso)
 
-write.csv(predictions.lasso, paste0(dir.data,"lasso_1.csv"))
+#write.csv(predictions.lasso, paste0(dir.data,"lasso_1.csv"))
 
 ```
-
 
 # Results
 
 ## Comparing Importance Results
 
 ```{r Comparison, eval=TRUE}
-results_df <- results_df[order(-results_df$meanImp),]
-results_df$feature <- factor(row.names(results_df),levels=unique(row.names(results_df))[order(results_df$meanImp,decreasing=FALSE)])
-
 xgb_df <- data.frame(importance_matrix)
 xgb_df$Feature <- factor(xgb_df$Feature,levels=unique(xgb_df$Feature)[order(xgb_df$Gain,decreasing=FALSE)])
 
@@ -1198,30 +1316,26 @@ nfeats = 15
 
 secondaxis <- list(overlaying="y",side="right",title="XGBoost")
 
-p_boruta <- plot_ly(x=head(results_df[,"meanImp"],n=nfeats),y=head(results_df$feature,n=nfeats), type="bar", orientation = "h",name="Boruta")
-p_xgb <- plot_ly(x=head(xgb_df$Gain,n=nfeats),y=head(xgb_df$Feature,n=nfeats),type="bar",orientation="h", name="XGBoost") %>% layout(title="Boruta vs XG Boost - Feature Importance")
+p_boruta <- plot_ly(x=head(results_df$meanImp,n=nfeats)
+                    ,y=head(results_df$feature,n=nfeats)
+                    ,type="bar"
+                    ,orientation = "h"
+                    ,name="Boruta")
+p_xgb <- plot_ly(x=head(xgb_df$Gain,n=nfeats)
+                 ,y=head(xgb_df$Feature,n=nfeats)
+                 ,type="bar",orientation="h", name="XGBoost") %>% 
+  layout(title="Boruta vs XG Boost - Feature Importance")
 
-p_compare <- subplot(p,p_xgb)
+p_compare <- subplot(p_boruta,p_xgb)
 
 #htmlwidgets::saveWidget(p_compare, "Boruta vs XGBoost Feature Importance.html")
 
-p_compare
+fluidPage(
+  fluidRow(p_compare)
+)
+
 
 ```
-
-
-# Correlation Analysis
-
-Unfortunately, the corrplot package only works with Numeric data fields.  To do a correlation analysis on all other variables, we would probably need to run ANOVA tests.
-```{r, eval=TRUE}
-M <-cor(explanatory[,sapply(explanatory,is.numeric)])
-corrplot(M,method="circle")
-
-M <- cor(explanatory.train[,c("GarageCars","GarageArea")])
-corrplot(M,method="circle")
-
-```
-
 
 #Appendix A. Data Dictionary
 
@@ -1825,8 +1939,6 @@ Multiple imputation is a statistical technique for analyzing incomplete data set
   2.  **Analysis:** Analyze each of the m completed data sets. This step results in m analyses.
   3.  **Pooling:** Integrate the m analysis results into a final result. Simple rules exist for combining the m analyses.
 
-![*Imputation Diagram*](C:/Zeno/R/House Prices/Imputation.png)
-
 There are numerous ways to do the multiple imputation.  From the `mice` package, we have the following methods.  
 
 ```{r}
@@ -1882,3 +1994,4 @@ anchor.test <- cbind(anchor.test, imp.test.completed)
 colnames(anchor.test)
 sapply(anchor, function(x) sum(is.na(x)))
 ```
+
